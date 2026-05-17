@@ -1,0 +1,27 @@
+schemaVersion: skillspace.workflow.v1
+name: skill-space
+nodes:
+  - id: identify
+    title: 识别可复用工作流
+    kind: analysis
+    description: 提取目标、触发条件、输入、输出、工具、命令、文件和验证步骤。
+  - id: package
+    title: 生成通用技能包
+    kind: write
+    description: 写入 SKILL.md，并将 Skill-Space 元数据放入 .skillspace。
+  - id: register
+    title: 注册到本地技能库
+    kind: filesystem
+    description: 将技能保存到 D:\Skill-Space\skills\<skill-name>。
+  - id: report
+    title: 返回安装结果
+    kind: response
+    description: 返回技能目录、生成文件、支持执行器和需要用户复核的内容。
+edges:
+  - from: identify
+    to: package
+  - from: package
+    to: register
+  - from: register
+    to: report
+

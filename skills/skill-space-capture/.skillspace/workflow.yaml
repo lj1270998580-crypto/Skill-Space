@@ -1,0 +1,27 @@
+schemaVersion: skillspace.workflow.v1
+name: skill-space-capture
+nodes:
+  - id: capture
+    title: 捕获工作流
+    kind: analysis
+    description: 读取对话、用户描述或已有文件，抽取可复用流程。
+  - id: normalize
+    title: 规范化技能
+    kind: transform
+    description: 生成技能名、说明、输入输出和权限声明。
+  - id: write
+    title: 写入技能包
+    kind: filesystem
+    description: 创建 SKILL.md 与 .skillspace 元数据。
+  - id: verify
+    title: 验证并返回
+    kind: verification
+    description: 检查文件结构并返回安装结果。
+edges:
+  - from: capture
+    to: normalize
+  - from: normalize
+    to: write
+  - from: write
+    to: verify
+

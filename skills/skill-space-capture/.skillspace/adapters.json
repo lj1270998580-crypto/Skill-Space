@@ -1,0 +1,18 @@
+{
+  "default": "claude",
+  "agents": {
+    "claude": {
+      "command": "claude"
+    },
+    "codex": {
+      "command": "codex"
+    },
+    "openclaw": {
+      "command": "openclaw"
+    },
+    "hermes": {
+      "command": "wsl"
+    }
+  }
+}
+

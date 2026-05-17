@@ -101,6 +101,30 @@ npm run typecheck
 npm run build
 ```
 
+生成 Windows 安装包：
+
+```powershell
+npm run dist:win
+```
+
+如果 Electron 下载缓存损坏，项目配置会优先使用本地 `node_modules\electron\dist` 作为打包运行时，减少网络和缓存问题。
+
+安装包输出位置：
+
+```text
+release\Skill-Space-Setup-0.1.0-x64.exe
+```
+
+如果要让 Agent 通过 GitHub 地址安装应用和技能，请把仓库地址交给 Agent，并让它执行：
+
+```powershell
+git clone https://github.com/lj1270998580-crypto/Skill-Space.git D:\Skill-Space\source\Skill-Space
+cd D:\Skill-Space\source\Skill-Space
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-from-github.ps1 -RepoUrl https://github.com/lj1270998580-crypto/Skill-Space.git
+```
+
+更完整的 Agent 安装说明见 [AGENT_INSTALL.md](AGENT_INSTALL.md)。
+
 ### 桌面快捷方式
 
 当前快捷方式创建在：
@@ -250,6 +274,30 @@ Build:
 npm run build
 ```
 
+Build the Windows installer:
+
+```powershell
+npm run dist:win
+```
+
+If the Electron download cache is corrupted, the project configuration prefers the local `node_modules\electron\dist` runtime while packaging.
+
+Installer output:
+
+```text
+release\Skill-Space-Setup-0.1.0-x64.exe
+```
+
+To let an agent install the app and bundled skills from the GitHub URL, give it the repository URL and ask it to run:
+
+```powershell
+git clone https://github.com/lj1270998580-crypto/Skill-Space.git D:\Skill-Space\source\Skill-Space
+cd D:\Skill-Space\source\Skill-Space
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-from-github.ps1 -RepoUrl https://github.com/lj1270998580-crypto/Skill-Space.git
+```
+
+See [AGENT_INSTALL.md](AGENT_INSTALL.md) for the full agent install guide.
+
 ### Typical Workflow
 
 1. Open Skill-Space.
@@ -265,4 +313,3 @@ npm run build
 ### Repository Notes
 
 This project is currently optimized for a single-user local Windows setup. The default permission mode is intentionally broad because it is designed for personal automation experiments. Before using shared machines or sensitive workspaces, review each skill's permissions and execution commands.
-

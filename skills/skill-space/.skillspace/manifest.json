@@ -1,0 +1,14 @@
+{
+  "schemaVersion": "skillspace.manifest.v1",
+  "name": "skill-space",
+  "displayName": "Skill-Space 工作流发布",
+  "version": "1.0.0",
+  "description": "将可复用 AI Agent 工作流转换为通用 SKILL.md 技能包，并同步到 Skill-Space 本地技能库。",
+  "defaultAgent": "claude",
+  "supportedAgents": ["claude", "codex", "openclaw", "hermes"],
+  "permissionMode": "full",
+  "tags": ["SkillOps"],
+  "updatedAt": "2026-05-17T00:00:00.000Z",
+  "agentCreated": true
+}
+

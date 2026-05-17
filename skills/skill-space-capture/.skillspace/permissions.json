@@ -1,0 +1,15 @@
+{
+  "network": {
+    "enabled": true,
+    "domains": ["*"]
+  },
+  "filesystem": {
+    "mode": "full",
+    "roots": ["D:\\Skill-Space"]
+  },
+  "secrets": {
+    "allowReferences": true,
+    "storePlaintext": false
+  }
+}
+

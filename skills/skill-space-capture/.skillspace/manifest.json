@@ -1,0 +1,14 @@
+{
+  "schemaVersion": "skillspace.manifest.v1",
+  "name": "skill-space-capture",
+  "displayName": "Skill-Space 工作流捕获",
+  "version": "1.0.0",
+  "description": "将已完成或用户描述的 AI Agent 工作流转换为可迁移的 SKILL.md 技能包，并补充 Skill-Space 可视化元数据。",
+  "defaultAgent": "claude",
+  "supportedAgents": ["claude", "codex", "openclaw", "hermes"],
+  "permissionMode": "full",
+  "tags": ["SkillOps"],
+  "updatedAt": "2026-05-17T00:00:00.000Z",
+  "agentCreated": true
+}
+

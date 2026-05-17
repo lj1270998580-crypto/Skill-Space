@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "workflowDescription": {
+      "type": "string",
+      "title": "工作流描述"
+    },
+    "preferredName": {
+      "type": "string",
+      "title": "期望技能名"
+    }
+  }
+}
+

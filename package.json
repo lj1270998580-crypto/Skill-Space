@@ -5,11 +5,14 @@
   "type": "module",
   "main": "out/main/index.js",
   "description": "Local SkillOps desktop workspace for universal AI agent skills.",
+  "author": "Skill-Space",
   "scripts": {
     "dev": "electron-vite dev",
     "build": "tsc --noEmit && electron-vite build",
     "preview": "electron-vite preview",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "pack:win": "npm run build && electron-builder --win --dir --config.electronDist=node_modules/electron/dist",
+    "dist:win": "npm run build && electron-builder --win nsis --config.electronDist=node_modules/electron/dist"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^5.1.1",
@@ -24,7 +27,58 @@
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",
     "electron": "^39.2.7",
+    "electron-builder": "^26.8.1",
     "typescript": "^5.9.3",
     "vite": "^7.2.7"
+  },
+  "build": {
+    "appId": "space.skillspace.desktop",
+    "productName": "Skill-Space",
+    "copyright": "Copyright © 2026 Skill-Space",
+    "directories": {
+      "output": "release"
+    },
+    "electronDist": "node_modules/electron/dist",
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "resources",
+        "to": "resources",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "skills",
+        "to": "skills",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "resources/skill-space-liquid.ico",
+      "artifactName": "${productName}-Setup-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowElevation": true,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Skill-Space"
+    }
   }
 }
