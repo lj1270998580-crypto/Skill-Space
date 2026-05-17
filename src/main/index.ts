@@ -32,7 +32,7 @@ import type {
 } from "../shared/types";
 
 const configPath = "D:\\Skill-Space\\config\\skillspace.config.json";
-const appIconPath = join(app.getAppPath(), "resources", process.platform === "win32" ? "skill-space.ico" : "skill-space.png");
+const appIconPath = join(app.getAppPath(), "resources", process.platform === "win32" ? "skill-space-liquid.ico" : "skill-space.png");
 
 let mainWindow: BrowserWindow | null = null;
 let schedulerTimer: NodeJS.Timeout | null = null;
