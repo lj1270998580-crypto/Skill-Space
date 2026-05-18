@@ -229,6 +229,37 @@ export interface BackgroundSchedulerStatus {
   silent?: boolean;
 }
 
+export type FeishuReceiveIdType = "open_id" | "chat_id";
+
+export interface FeishuStatus {
+  enabled: boolean;
+  configured: boolean;
+  connected: boolean;
+  state: "disabled" | "not_configured" | "connecting" | "connected" | "error";
+  detail: string;
+  appId?: string;
+  receiveId?: string;
+  receiveIdType: FeishuReceiveIdType;
+  qrDataUrl?: string;
+  qrUrl?: string;
+  qrExpiresAt?: string;
+  lastEventAt?: string;
+  lastError?: string;
+  canSend: boolean;
+}
+
+export interface SaveFeishuConfigRequest {
+  enabled: boolean;
+  appId: string;
+  appSecret?: string;
+  receiveId?: string;
+  receiveIdType: FeishuReceiveIdType;
+}
+
+export interface StartFeishuConnectRequest {
+  domain?: "feishu" | "lark";
+}
+
 export interface SkillSpaceApi {
   bootstrap(): Promise<BootstrapPayload>;
   refreshAgents(): Promise<AgentHealth[]>;
@@ -254,6 +285,11 @@ export interface SkillSpaceApi {
   toggleSchedule(scheduleId: string, enabled: boolean): Promise<ScheduledTask>;
   getBackgroundSchedulerStatus(): Promise<BackgroundSchedulerStatus>;
   setBackgroundScheduler(enabled: boolean): Promise<BackgroundSchedulerStatus>;
+  getFeishuStatus(): Promise<FeishuStatus>;
+  startFeishuConnect(request?: StartFeishuConnectRequest): Promise<FeishuStatus>;
+  saveFeishuConfig(request: SaveFeishuConfigRequest): Promise<FeishuStatus>;
+  setFeishuEnabled(enabled: boolean): Promise<FeishuStatus>;
+  sendFeishuTest(message?: string): Promise<FeishuStatus>;
   askLlm(request: LlmAnalyzeRequest): Promise<LlmAnalyzeResponse>;
   minimizeWindow(): Promise<void>;
   toggleMaximizeWindow(): Promise<void>;

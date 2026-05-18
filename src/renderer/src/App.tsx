@@ -22,9 +22,11 @@ import {
   LayoutDashboard,
   Loader2,
   Maximize2,
+  MessageCircle,
   Minus,
   Moon,
   Play,
+  QrCode,
   RefreshCw,
   Search,
   ScrollText,
@@ -48,6 +50,8 @@ import type {
   BackgroundSchedulerStatus,
   BootstrapPayload,
   DiscoveredSkill,
+  FeishuReceiveIdType,
+  FeishuStatus,
   Locale,
   RunArtifact,
   RunEvent,
@@ -105,6 +109,7 @@ export function App(): ReactElement {
   const [runArtifacts, setRunArtifacts] = useState<RunArtifact[]>([]);
   const [skillChanges, setSkillChanges] = useState<SkillChange[]>([]);
   const [backgroundScheduler, setBackgroundScheduler] = useState<BackgroundSchedulerStatus | null>(null);
+  const [feishuStatus, setFeishuStatus] = useState<FeishuStatus | null>(null);
   const [schedules, setSchedules] = useState<ScheduledTask[]>([]);
   const [scheduleName, setScheduleName] = useState("");
   const [scheduleInput, setScheduleInput] = useState("");
@@ -202,12 +207,14 @@ export function App(): ReactElement {
       window.skillSpace.listSkillChanges(),
       window.skillSpace.getBackgroundSchedulerStatus()
     ]);
+    const nextFeishuStatus = await window.skillSpace.getFeishuStatus();
     const storedLocale = window.localStorage.getItem("skillspace.locale") as Locale | null;
     setPayload(next);
     setRunHistory(next.runs);
     setSchedules(next.schedules);
     setSkillChanges(changes);
     setBackgroundScheduler(schedulerStatus);
+    setFeishuStatus(nextFeishuStatus);
     setSelectedRunId((current) => current ?? next.runs[0]?.runId ?? null);
     setLocale(
       storedLocale && next.config.locale.supported.includes(storedLocale)
@@ -236,11 +243,13 @@ export function App(): ReactElement {
       window.skillSpace.listSkillChanges(),
       window.skillSpace.getBackgroundSchedulerStatus()
     ]);
+    const nextFeishuStatus = await window.skillSpace.getFeishuStatus();
     setPayload((current) => (current ? { ...current, agents, skills, runs, schedules: nextSchedules } : current));
     setRunHistory(runs);
     setSchedules(nextSchedules);
     setSkillChanges(changes);
     setBackgroundScheduler(schedulerStatus);
+    setFeishuStatus(nextFeishuStatus);
     setSelectedRunId((current) => current ?? runs[0]?.runId ?? null);
     setSelectedSkillId((current) => current ?? skills[0]?.id ?? null);
     if (selectedSkillId) {
@@ -528,6 +537,28 @@ export function App(): ReactElement {
     setBackgroundScheduler(await window.skillSpace.setBackgroundScheduler(enabled));
   }
 
+  async function startFeishuConnect(): Promise<void> {
+    setFeishuStatus(await window.skillSpace.startFeishuConnect({ domain: "feishu" }));
+  }
+
+  async function saveFeishuConfig(request: {
+    enabled: boolean;
+    appId: string;
+    appSecret?: string;
+    receiveId?: string;
+    receiveIdType: FeishuReceiveIdType;
+  }): Promise<void> {
+    setFeishuStatus(await window.skillSpace.saveFeishuConfig(request));
+  }
+
+  async function setFeishuEnabled(enabled: boolean): Promise<void> {
+    setFeishuStatus(await window.skillSpace.setFeishuEnabled(enabled));
+  }
+
+  async function sendFeishuTest(): Promise<void> {
+    setFeishuStatus(await window.skillSpace.sendFeishuTest());
+  }
+
   async function openSelectedRunFolder(): Promise<void> {
     if (!selectedRun) {
       return;
@@ -557,6 +588,13 @@ export function App(): ReactElement {
         });
       }
     });
+  }, []);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      void window.skillSpace.getFeishuStatus().then(setFeishuStatus).catch(() => undefined);
+    }, 5_000);
+    return () => window.clearInterval(timer);
   }, []);
 
   useEffect(() => {
@@ -718,6 +756,14 @@ export function App(): ReactElement {
             >
               {theme === "dark" ? <Sun size={17} /> : <Moon size={17} />}
             </button>
+            <button
+              className={`icon-button feishu-top-status ${feishuStatus?.state ?? "not_configured"}`}
+              onClick={() => setActiveView("settings")}
+              type="button"
+              title={`${t("settings.feishu")}: ${t(`feishu.state.${feishuStatus?.state ?? "not_configured"}`)}`}
+            >
+              <MessageCircle size={17} />
+            </button>
             <button className="secondary-button" onClick={() => void importSkill()} type="button">
               <FolderInput size={16} />
               <span>{t("action.import")}</span>
@@ -874,6 +920,11 @@ export function App(): ReactElement {
                 onUseParameterFormChange={toggleParameterForm}
                 backgroundScheduler={backgroundScheduler}
                 onBackgroundSchedulerChange={(enabled) => void toggleBackgroundScheduler(enabled)}
+                feishuStatus={feishuStatus}
+                onStartFeishuConnect={() => void startFeishuConnect()}
+                onSaveFeishuConfig={(request) => void saveFeishuConfig(request)}
+                onFeishuEnabledChange={(enabled) => void setFeishuEnabled(enabled)}
+                onSendFeishuTest={() => void sendFeishuTest()}
                 t={t}
               />
             )}
@@ -1699,6 +1750,11 @@ function SettingsPanel({
   onUseParameterFormChange,
   backgroundScheduler,
   onBackgroundSchedulerChange,
+  feishuStatus,
+  onStartFeishuConnect,
+  onSaveFeishuConfig,
+  onFeishuEnabledChange,
+  onSendFeishuTest,
   t
 }: {
   payload: BootstrapPayload;
@@ -1714,8 +1770,32 @@ function SettingsPanel({
   onUseParameterFormChange: (enabled: boolean) => void;
   backgroundScheduler: BackgroundSchedulerStatus | null;
   onBackgroundSchedulerChange: (enabled: boolean) => void;
+  feishuStatus: FeishuStatus | null;
+  onStartFeishuConnect: () => void;
+  onSaveFeishuConfig: (request: {
+    enabled: boolean;
+    appId: string;
+    appSecret?: string;
+    receiveId?: string;
+    receiveIdType: FeishuReceiveIdType;
+  }) => void;
+  onFeishuEnabledChange: (enabled: boolean) => void;
+  onSendFeishuTest: () => void;
   t: (key: string) => string;
 }): ReactElement {
+  const [feishuAppId, setFeishuAppId] = useState(feishuStatus?.appId ?? "");
+  const [feishuSecret, setFeishuSecret] = useState("");
+  const [feishuReceiveId, setFeishuReceiveId] = useState(feishuStatus?.receiveId ?? "");
+  const [feishuReceiveIdType, setFeishuReceiveIdType] = useState<FeishuReceiveIdType>(
+    feishuStatus?.receiveIdType ?? "open_id"
+  );
+
+  useEffect(() => {
+    setFeishuAppId(feishuStatus?.appId ?? "");
+    setFeishuReceiveId(feishuStatus?.receiveId ?? "");
+    setFeishuReceiveIdType(feishuStatus?.receiveIdType ?? "open_id");
+  }, [feishuStatus?.appId, feishuStatus?.receiveId, feishuStatus?.receiveIdType]);
+
   return (
     <section className="settings-grid">
       <article className="settings-card settings-wide glass-panel">
@@ -1786,6 +1866,71 @@ function SettingsPanel({
             onChange={(event) => onBackgroundSchedulerChange(event.target.checked)}
           />
           <span>{backgroundScheduler?.enabled ? t("action.enabled") : t("action.disabled")}</span>
+        </label>
+      </article>
+      <article className="settings-card feishu-card glass-panel">
+        <MessageCircle size={19} />
+        <label>{t("settings.feishu")}</label>
+        <p>{feishuStatus?.detail ?? t("status.checking")}</p>
+        <div className={`connection-badge ${feishuStatus?.state ?? "not_configured"}`}>
+          <span />
+          <b>{t(`feishu.state.${feishuStatus?.state ?? "not_configured"}`)}</b>
+        </div>
+        {feishuStatus?.qrDataUrl && (
+          <div className="qr-box">
+            <img src={feishuStatus.qrDataUrl} alt={t("feishu.qrAlt")} />
+            <span>{t("feishu.scanHint")}</span>
+          </div>
+        )}
+        <div className="feishu-form">
+          <input value={feishuAppId} onChange={(event) => setFeishuAppId(event.target.value)} placeholder={t("feishu.appId")} />
+          <input
+            value={feishuSecret}
+            onChange={(event) => setFeishuSecret(event.target.value)}
+            placeholder={feishuStatus?.configured ? t("feishu.secretKeep") : t("feishu.appSecret")}
+            type="password"
+          />
+          <select
+            className="glass-select wide"
+            value={feishuReceiveIdType}
+            onChange={(event) => setFeishuReceiveIdType(event.target.value as FeishuReceiveIdType)}
+          >
+            <option value="open_id">{t("feishu.openId")}</option>
+            <option value="chat_id">{t("feishu.chatId")}</option>
+          </select>
+          <input value={feishuReceiveId} onChange={(event) => setFeishuReceiveId(event.target.value)} placeholder={t("feishu.receiveId")} />
+        </div>
+        <div className="feishu-actions">
+          <button className="secondary-button" onClick={onStartFeishuConnect} type="button">
+            <QrCode size={16} />
+            <span>{t("feishu.connect")}</span>
+          </button>
+          <button
+            className="secondary-button"
+            onClick={() =>
+              onSaveFeishuConfig({
+                enabled: feishuStatus?.enabled ?? true,
+                appId: feishuAppId,
+                appSecret: feishuSecret,
+                receiveId: feishuReceiveId,
+                receiveIdType: feishuReceiveIdType
+              })
+            }
+            type="button"
+          >
+            {t("action.save")}
+          </button>
+          <button className="secondary-button" onClick={onSendFeishuTest} type="button" disabled={!feishuStatus?.canSend}>
+            {t("feishu.test")}
+          </button>
+        </div>
+        <label className="switch-row">
+          <input
+            type="checkbox"
+            checked={Boolean(feishuStatus?.enabled)}
+            onChange={(event) => onFeishuEnabledChange(event.target.checked)}
+          />
+          <span>{feishuStatus?.enabled ? t("action.enabled") : t("action.disabled")}</span>
         </label>
       </article>
       <article className="settings-card glass-panel">

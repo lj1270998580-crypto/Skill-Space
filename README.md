@@ -46,6 +46,7 @@ Skill-Space 是一个面向个人自动化工作流的本地桌面应用。它�
 | 运行控制台 | 查看实时日志、运行历史、运行产物，并支持继续对话 |
 | 自动化 | 支持一次、每天、每周、每月和间隔触发 |
 | 后台守护 | 通过 Windows Task Scheduler 静默检查定时任务，避免弹出命令窗口 |
+| 飞书通信 | 支持扫码连接飞书自建应用，显示连接状态，推送运行结果，并接收 `/skill` 远程指令 |
 | LLM 辅助 | 自动总结技能说明、分析运行历史、生成单标签分类和自动化建议 |
 | 应用显示名 | 支持给技能设置本地显示名，方便按项目识别，不修改技能真实参数 |
 | 双语界面 | 默认中文，设置中可切换英文 |
@@ -178,6 +179,19 @@ D:\Skill-Space\
 7. 查看实时日志和运行产物。
 8. 对需要长期执行的技能，在“自动化”页面创建定时任务。
 9. 在“设置”中开启后台定时守护，并查看守护状态。
+10. 如需手机协同，在“设置 → 飞书通信”中扫码连接或手动填写 App 信息，开启运行通知和远程指令。
+
+### 飞书通信
+
+Skill-Space 使用飞书/Lark 官方 Node SDK 接入企业自建应用能力。当前实现包括：
+
+- 设置页显示飞书状态：已关闭、未配置、连接中、已连接或异常。
+- 支持扫码创建/授权应用，也支持手动保存 `App ID`、`App Secret` 和接收人/群 ID。
+- 使用 Electron `safeStorage` 优先加密保存 `App Secret` 到本机配置。
+- 运行开始、完成、失败、等待确认时向飞书发送通知。
+- 支持在飞书发送 `/skill list`、`/skill status`、`/skill run <技能ID或名称> <输入>`。
+
+飞书权限、机器人可见范围、事件订阅和长连接能力仍需在飞书开放平台侧按企业策略开启。
 
 ### 开发
 
@@ -279,6 +293,7 @@ The UI defaults to Simplified Chinese and can be switched to English in Settings
 | Run Console | View live logs, history, artifacts, and continue interactive runs |
 | Automation | Schedule one-time, daily, weekly, monthly, or interval-based runs |
 | Background Scheduler | Use Windows Task Scheduler silently without command-window popups |
+| Feishu Messaging | Connect a Feishu/Lark self-built bot, show connection status, send run notifications, and accept `/skill` commands |
 | LLM Assistance | Summarize skills, analyze runs, classify skills, and suggest automation strategies |
 | Local Aliases | Give a skill a local display name without changing its real id or parameters |
 | Bilingual UI | Chinese by default, English optional |
@@ -317,6 +332,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-from-githu
 The script installs dependencies, builds the Windows installer, optionally runs it, and installs the bundled `skill-space` and `skill-space-capture` skills into common agent skill roots.
 
 See [AGENT_INSTALL.md](AGENT_INSTALL.md) for details.
+
+### Feishu / Lark Messaging
+
+Skill-Space integrates with the official Feishu/Lark Node SDK for self-built bot apps. The Settings page can show connection state, start QR-code registration, save manual app credentials, send test messages, push run lifecycle updates, and accept `/skill` remote commands.
+
+Secrets are stored locally and encrypted with Electron `safeStorage` when available. Feishu-side scopes, bot visibility, event subscription, and long-connection permissions must still be enabled in the Feishu Open Platform console.
 
 ### Skill Package Convention
 
@@ -376,4 +397,3 @@ npm run dist:win
 ### Notes
 
 Skill-Space is currently optimized for a single-user local Windows environment. The default permission mode is intentionally broad for personal automation experiments. Review each skill's permission and execution commands before using it on shared or sensitive machines.
-

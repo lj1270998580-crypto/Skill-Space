@@ -214,6 +214,53 @@ export function installMockApiWhenMissing(): void {
       taskName: "Skill-Space Background Scheduler",
       detail: enabled ? "Mock background scheduler enabled." : "Mock background scheduler disabled."
     }),
+    getFeishuStatus: async () => ({
+      enabled: false,
+      configured: false,
+      connected: false,
+      state: "disabled",
+      detail: "Mock preview Feishu messaging is disabled.",
+      receiveIdType: "open_id",
+      canSend: false
+    }),
+    startFeishuConnect: async () => ({
+      enabled: true,
+      configured: false,
+      connected: false,
+      state: "connecting",
+      detail: "Mock preview QR connection is waiting.",
+      receiveIdType: "open_id",
+      canSend: false
+    }),
+    saveFeishuConfig: async (request) => ({
+      enabled: request.enabled,
+      configured: Boolean(request.appId),
+      connected: false,
+      state: request.enabled ? "connecting" : "disabled",
+      detail: "Mock preview Feishu config saved.",
+      appId: request.appId,
+      receiveId: request.receiveId,
+      receiveIdType: request.receiveIdType,
+      canSend: Boolean(request.enabled && request.appId && request.receiveId)
+    }),
+    setFeishuEnabled: async (enabled) => ({
+      enabled,
+      configured: false,
+      connected: false,
+      state: enabled ? "not_configured" : "disabled",
+      detail: enabled ? "Mock preview Feishu messaging enabled." : "Mock preview Feishu messaging disabled.",
+      receiveIdType: "open_id",
+      canSend: false
+    }),
+    sendFeishuTest: async () => ({
+      enabled: true,
+      configured: true,
+      connected: true,
+      state: "connected",
+      detail: "Mock preview test sent.",
+      receiveIdType: "open_id",
+      canSend: true
+    }),
     askLlm: async () => ({ result: "这是 Skill-Space 的本地 LLM 分析结果预览。" }),
     minimizeWindow: async () => {
       document.body.classList.add("preview-minimized");

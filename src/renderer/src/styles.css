@@ -341,6 +341,34 @@ textarea:focus-visible {
     0 10px 22px rgba(36, 57, 68, 0.12);
 }
 
+.feishu-top-status {
+  position: relative;
+}
+
+.feishu-top-status::after {
+  position: absolute;
+  right: 7px;
+  bottom: 7px;
+  width: 8px;
+  height: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.72);
+  border-radius: 50%;
+  content: "";
+  background: #9aa7aa;
+}
+
+.feishu-top-status.connected::after {
+  background: #23ba82;
+}
+
+.feishu-top-status.connecting::after {
+  background: #d8a933;
+}
+
+.feishu-top-status.error::after {
+  background: #d64a42;
+}
+
 .primary-button {
   display: inline-flex;
   align-items: center;
@@ -1416,6 +1444,98 @@ textarea:focus-visible {
   white-space: nowrap;
 }
 
+.feishu-card {
+  align-items: start;
+}
+
+.feishu-card p,
+.feishu-card .connection-badge,
+.feishu-card .qr-box,
+.feishu-card .feishu-form,
+.feishu-card .feishu-actions {
+  grid-column: 2;
+}
+
+.connection-badge {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  width: max-content;
+  min-height: 28px;
+  padding: 0 10px;
+  border: 1px solid rgba(255, 255, 255, 0.44);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.connection-badge span {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #9aa7aa;
+  box-shadow: 0 0 0 4px rgba(154, 167, 170, 0.12);
+}
+
+.connection-badge.connected span {
+  background: #23ba82;
+  box-shadow: 0 0 0 4px rgba(35, 186, 130, 0.16);
+}
+
+.connection-badge.connecting span {
+  background: #d8a933;
+  box-shadow: 0 0 0 4px rgba(216, 169, 51, 0.16);
+}
+
+.connection-badge.error span {
+  background: #d64a42;
+  box-shadow: 0 0 0 4px rgba(214, 74, 66, 0.16);
+}
+
+.qr-box {
+  display: grid;
+  justify-items: start;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.44);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.qr-box img {
+  width: 128px;
+  height: 128px;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.qr-box span {
+  color: rgba(22, 33, 44, 0.62);
+  font-size: 12px;
+}
+
+.feishu-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px;
+}
+
+.feishu-form input {
+  min-width: 0;
+  height: 38px;
+  padding: 0 10px;
+  border: 1px solid rgba(255, 255, 255, 0.58);
+  border-radius: 8px;
+  color: #16212c;
+  background: rgba(255, 255, 255, 0.38);
+  outline: none;
+}
+
+.feishu-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .settings-card strong {
   grid-column: 1 / -1;
   overflow: hidden;
@@ -1850,6 +1970,7 @@ textarea:focus-visible {
 .theme-dark .discovered-row,
 .theme-dark .automation-form input,
 .theme-dark .automation-form textarea,
+.theme-dark .feishu-form input,
 .theme-dark .settings-card textarea,
 .theme-dark .llm-result {
   color: #eaf7f5;
@@ -1862,6 +1983,7 @@ textarea:focus-visible {
 .theme-dark .automation-times span,
 .theme-dark .discovered-row span,
 .theme-dark .discovered-row code,
+.theme-dark .qr-box span,
 .theme-dark .settings-card.settings-wide p {
   color: rgba(234, 247, 245, 0.62);
 }
@@ -1965,6 +2087,12 @@ textarea:focus-visible {
 .theme-dark .scheduler-status {
   background: rgba(255, 255, 255, 0.06);
   border-color: rgba(214, 255, 250, 0.12);
+}
+
+.theme-dark .connection-badge,
+.theme-dark .qr-box {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(214, 255, 250, 0.14);
 }
 
 .theme-dark .scheduler-status b {

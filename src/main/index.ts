@@ -1,9 +1,10 @@
-import { app, BrowserWindow, dialog, ipcMain, shell, type OpenDialogOptions } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, safeStorage, shell, type OpenDialogOptions } from "electron";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { cp, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
+import QRCode from "qrcode";
 import type {
   AgentConfig,
   AgentHealth,
@@ -15,6 +16,8 @@ import type {
   ContinueRunResponse,
   CreateScheduleRequest,
   DiscoveredSkill,
+  FeishuReceiveIdType,
+  FeishuStatus,
   ImportSkillResponse,
   LlmAnalyzeRequest,
   LlmAnalyzeResponse,
@@ -23,6 +26,7 @@ import type {
   RunSkillRequest,
   RunSkillResponse,
   RunSummary,
+  SaveFeishuConfigRequest,
   ScheduledTask,
   SkillChange,
   SkillDetail,
@@ -43,6 +47,23 @@ const appIconPath = bundledResourcePath(process.platform === "win32" ? "skill-sp
 
 let mainWindow: BrowserWindow | null = null;
 let schedulerTimer: NodeJS.Timeout | null = null;
+let feishuChannel: { connect?: () => Promise<void>; disconnect?: () => Promise<void>; send?: (to: string, input: { text: string } | { markdown: string }) => Promise<unknown>; on?: (...args: unknown[]) => unknown } | null = null;
+let feishuRuntimeState: FeishuStatus["state"] = "not_configured";
+let feishuQrState: Pick<FeishuStatus, "qrDataUrl" | "qrUrl" | "qrExpiresAt"> = {};
+let feishuLastEventAt: string | undefined;
+let feishuLastError: string | undefined;
+let feishuRegisterController: AbortController | null = null;
+
+type FeishuStoredConfig = {
+  schemaVersion: "skillspace.feishu.v1";
+  enabled: boolean;
+  appId: string;
+  encryptedAppSecret: string;
+  receiveId?: string;
+  receiveIdType: FeishuReceiveIdType;
+  createdAt: string;
+  updatedAt: string;
+};
 
 const fallbackConfig: SkillSpaceConfig = {
   schemaVersion: "skillspace.config.v1",
@@ -340,6 +361,352 @@ async function readOptionalJson<T>(path: string): Promise<T | undefined> {
 async function writeJsonFile(path: string, value: unknown): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+function feishuConfigPath(config: SkillSpaceConfig): string {
+  return join(config.dataRoot, "config", "feishu.config.json");
+}
+
+function encryptSecret(value: string): string {
+  if (safeStorage.isEncryptionAvailable()) {
+    return `safe:${safeStorage.encryptString(value).toString("base64")}`;
+  }
+  return `plain:${Buffer.from(value, "utf8").toString("base64")}`;
+}
+
+function decryptSecret(value: string): string {
+  if (value.startsWith("safe:")) {
+    return safeStorage.decryptString(Buffer.from(value.slice(5), "base64"));
+  }
+  if (value.startsWith("plain:")) {
+    return Buffer.from(value.slice(6), "base64").toString("utf8");
+  }
+  return "";
+}
+
+async function readFeishuConfig(config: SkillSpaceConfig): Promise<FeishuStoredConfig | null> {
+  return readJsonFile<FeishuStoredConfig>(feishuConfigPath(config));
+}
+
+async function writeFeishuConfig(config: SkillSpaceConfig, value: FeishuStoredConfig): Promise<void> {
+  await writeJsonFile(feishuConfigPath(config), value);
+}
+
+function feishuStatusFromConfig(stored: FeishuStoredConfig | null): FeishuStatus {
+  const configured = Boolean(stored?.appId && stored.encryptedAppSecret);
+  const enabled = Boolean(stored?.enabled);
+  const connected = enabled && configured && feishuRuntimeState === "connected";
+  const state: FeishuStatus["state"] = !enabled
+    ? "disabled"
+    : !configured
+      ? "not_configured"
+      : feishuRuntimeState;
+
+  const detail =
+    state === "connected"
+      ? "飞书长连接已就绪，可以接收指令并推送运行状态。"
+      : state === "connecting"
+        ? "等待手机飞书扫码授权或正在建立长连接。"
+        : state === "error"
+          ? feishuLastError ?? "飞书连接异常。"
+          : state === "disabled"
+            ? "飞书通信已关闭。"
+            : "尚未配置飞书应用，请扫码连接或手动保存应用信息。";
+
+  return {
+    enabled,
+    configured,
+    connected,
+    state,
+    detail,
+    appId: stored?.appId,
+    receiveId: stored?.receiveId,
+    receiveIdType: stored?.receiveIdType ?? "open_id",
+    ...feishuQrState,
+    lastEventAt: feishuLastEventAt,
+    lastError: feishuLastError,
+    canSend: Boolean(enabled && configured && stored?.receiveId)
+  };
+}
+
+async function getFeishuStatus(config: SkillSpaceConfig): Promise<FeishuStatus> {
+  return feishuStatusFromConfig(await readFeishuConfig(config));
+}
+
+async function createFeishuChannel(stored: FeishuStoredConfig): Promise<typeof feishuChannel> {
+  const lark = await import("@larksuiteoapi/node-sdk");
+  return lark.createLarkChannel({
+    appId: stored.appId,
+    appSecret: decryptSecret(stored.encryptedAppSecret),
+    transport: "websocket",
+    policy: {
+      dmMode: "open",
+      requireMention: false
+    }
+  }) as typeof feishuChannel;
+}
+
+async function ensureFeishuChannel(config: SkillSpaceConfig): Promise<void> {
+  const stored = await readFeishuConfig(config);
+  if (!stored?.enabled || !stored.appId || !stored.encryptedAppSecret) {
+    feishuRuntimeState = stored?.enabled ? "not_configured" : "disabled";
+    return;
+  }
+  if (feishuRuntimeState === "connected" || feishuRuntimeState === "connecting") {
+    return;
+  }
+
+  feishuRuntimeState = "connecting";
+  feishuLastError = undefined;
+  try {
+    feishuChannel = await createFeishuChannel(stored);
+    feishuChannel?.on?.("message", (message: unknown) => {
+      feishuLastEventAt = new Date().toISOString();
+      void handleFeishuMessage(config, message);
+    });
+    feishuChannel?.on?.("error", (error: unknown) => {
+      feishuRuntimeState = "error";
+      feishuLastError = error instanceof Error ? error.message : String(error);
+    });
+    await feishuChannel?.connect?.();
+    feishuRuntimeState = "connected";
+  } catch (error) {
+    feishuRuntimeState = "error";
+    feishuLastError = error instanceof Error ? error.message : String(error);
+  }
+}
+
+async function disconnectFeishuChannel(): Promise<void> {
+  try {
+    await feishuChannel?.disconnect?.();
+  } catch {
+    // Closing a stale websocket should not block disabling Feishu.
+  }
+  feishuChannel = null;
+}
+
+async function startFeishuConnect(
+  config: SkillSpaceConfig,
+  request: { domain?: "feishu" | "lark" } = {}
+): Promise<FeishuStatus> {
+  const lark = await import("@larksuiteoapi/node-sdk");
+  feishuRegisterController?.abort();
+  feishuRegisterController = new AbortController();
+  feishuRuntimeState = "connecting";
+  feishuLastError = undefined;
+  feishuQrState = {};
+
+  const qrReady = new Promise<void>((resolveQr) => {
+    void lark
+      .registerApp({
+        domain: request.domain === "lark" ? "https://open.larksuite.com" : "https://open.feishu.cn",
+        source: "Skill-Space",
+        signal: feishuRegisterController?.signal,
+        onQRCodeReady: async (info: { url: string; expireIn: number }) => {
+          feishuQrState = {
+            qrUrl: info.url,
+            qrDataUrl: await QRCode.toDataURL(info.url, { margin: 1, width: 220 }),
+            qrExpiresAt: new Date(Date.now() + info.expireIn * 1000).toISOString()
+          };
+          resolveQr();
+        },
+        onStatusChange: () => {
+          feishuRuntimeState = "connecting";
+        }
+      })
+      .then(async (result) => {
+        const now = new Date().toISOString();
+        await writeFeishuConfig(config, {
+          schemaVersion: "skillspace.feishu.v1",
+          enabled: true,
+          appId: result.client_id,
+          encryptedAppSecret: encryptSecret(result.client_secret),
+          receiveId: result.user_info?.open_id,
+          receiveIdType: "open_id",
+          createdAt: now,
+          updatedAt: now
+        });
+        feishuQrState = {};
+        await disconnectFeishuChannel();
+        feishuRuntimeState = "not_configured";
+        void ensureFeishuChannel(config);
+      })
+      .catch((error) => {
+        if (feishuRegisterController?.signal.aborted) {
+          return;
+        }
+        feishuRuntimeState = "error";
+        feishuLastError = error instanceof Error ? error.message : String(error);
+        resolveQr();
+      });
+  });
+
+  await Promise.race([qrReady, new Promise((resolve) => setTimeout(resolve, 4_000))]);
+
+  return getFeishuStatus(config);
+}
+
+async function saveFeishuConfig(config: SkillSpaceConfig, request: SaveFeishuConfigRequest): Promise<FeishuStatus> {
+  const existing = await readFeishuConfig(config);
+  const now = new Date().toISOString();
+  if (!request.appId.trim()) {
+    throw new Error("Feishu appId is required.");
+  }
+  if (!request.appSecret?.trim() && !existing?.encryptedAppSecret) {
+    throw new Error("Feishu appSecret is required.");
+  }
+  await writeFeishuConfig(config, {
+    schemaVersion: "skillspace.feishu.v1",
+    enabled: request.enabled,
+    appId: request.appId.trim(),
+    encryptedAppSecret: request.appSecret?.trim()
+      ? encryptSecret(request.appSecret.trim())
+      : existing?.encryptedAppSecret ?? "",
+    receiveId: request.receiveId?.trim() || existing?.receiveId,
+    receiveIdType: request.receiveIdType,
+    createdAt: existing?.createdAt ?? now,
+    updatedAt: now
+  });
+  await disconnectFeishuChannel();
+  feishuRuntimeState = request.enabled ? "not_configured" : "disabled";
+  if (request.enabled) {
+    void ensureFeishuChannel(config);
+  }
+  return getFeishuStatus(config);
+}
+
+async function setFeishuEnabled(config: SkillSpaceConfig, enabled: boolean): Promise<FeishuStatus> {
+  const existing = await readFeishuConfig(config);
+  if (!existing) {
+    feishuRuntimeState = enabled ? "not_configured" : "disabled";
+    return getFeishuStatus(config);
+  }
+
+  await writeFeishuConfig(config, {
+    ...existing,
+    enabled,
+    updatedAt: new Date().toISOString()
+  });
+  if (!enabled) {
+    await disconnectFeishuChannel();
+    feishuRuntimeState = "disabled";
+  } else {
+    feishuRuntimeState = "not_configured";
+    void ensureFeishuChannel(config);
+  }
+  return getFeishuStatus(config);
+}
+
+async function sendFeishuText(config: SkillSpaceConfig, text: string): Promise<boolean> {
+  const stored = await readFeishuConfig(config);
+  if (!stored?.enabled || !stored.receiveId) {
+    return false;
+  }
+
+  try {
+    if (!feishuChannel || feishuRuntimeState !== "connected") {
+      await ensureFeishuChannel(config);
+    }
+    if (feishuChannel?.send && feishuRuntimeState === "connected") {
+      await feishuChannel.send(stored.receiveId, { text });
+      return true;
+    }
+
+    const lark = await import("@larksuiteoapi/node-sdk");
+    const client = new lark.Client({
+      appId: stored.appId,
+      appSecret: decryptSecret(stored.encryptedAppSecret),
+      domain: lark.Domain.Feishu
+    });
+    await client.im.v1.message.create({
+      params: { receive_id_type: stored.receiveIdType },
+      data: {
+        receive_id: stored.receiveId,
+        msg_type: "text",
+        content: JSON.stringify({ text })
+      }
+    });
+    return true;
+  } catch (error) {
+    feishuRuntimeState = "error";
+    feishuLastError = error instanceof Error ? error.message : String(error);
+    return false;
+  }
+}
+
+async function sendFeishuTest(config: SkillSpaceConfig, message?: string): Promise<FeishuStatus> {
+  await sendFeishuText(config, message?.trim() || "Skill-Space 飞书通信测试：连接可用。");
+  return getFeishuStatus(config);
+}
+
+async function notifyFeishuRun(config: SkillSpaceConfig, title: string, lines: string[]): Promise<void> {
+  const message = [`【Skill-Space】${title}`, ...lines.filter(Boolean)].join("\n");
+  await sendFeishuText(config, message);
+}
+
+async function handleFeishuMessage(config: SkillSpaceConfig, rawMessage: unknown): Promise<void> {
+  const message = rawMessage as {
+    content?: string;
+    chatId?: string;
+    senderId?: string;
+    replyToMessageId?: string;
+  };
+  const content = (message.content ?? "").trim();
+  if (!content.startsWith("/skill")) {
+    return;
+  }
+
+  const stored = await readFeishuConfig(config);
+  const target = message.chatId || message.senderId || stored?.receiveId;
+  if (!target) {
+    return;
+  }
+
+  const sendReply = async (text: string): Promise<void> => {
+    if (feishuChannel?.send) {
+      await feishuChannel.send(target, { text });
+      return;
+    }
+    await sendFeishuText(config, text);
+  };
+
+  const [, command = "help", ...rest] = content.split(/\s+/);
+  if (command === "help") {
+    await sendReply("可用指令：/skill list、/skill run <技能ID或名称> <输入>、/skill status。");
+    return;
+  }
+
+  if (command === "list") {
+    const skills = await scanSkills(config);
+    await sendReply(skills.slice(0, 12).map((skill) => `${skill.id} - ${skill.description}`).join("\n") || "暂无技能。");
+    return;
+  }
+
+  if (command === "status") {
+    const runs = await listRuns(config);
+    await sendReply(runs.slice(0, 5).map((run) => `${run.skillName}: ${run.status}`).join("\n") || "暂无运行历史。");
+    return;
+  }
+
+  if (command === "run") {
+    const [skillToken, ...inputParts] = rest;
+    if (!skillToken) {
+      await sendReply("请使用：/skill run <技能ID或名称> <输入>");
+      return;
+    }
+    const skills = await scanSkills(config);
+    const skill = skills.find((item) => item.id === skillToken || item.name === skillToken);
+    if (!skill) {
+      await sendReply(`没有找到技能：${skillToken}`);
+      return;
+    }
+    const response = await runSkill(config, {
+      skillId: skill.id,
+      runtime: skill.defaultRuntime,
+      input: inputParts.join(" ") || "来自飞书的远程执行请求。"
+    });
+    await sendReply(`已启动：${skill.name}\n运行 ID：${response.runId}`);
+  }
 }
 
 function registryIndexPath(config: SkillSpaceConfig): string {
@@ -1802,6 +2169,13 @@ async function executeRun(
             ? "Claude startup hook emitted warnings, but the run completed."
             : runSummary.diagnostic
     });
+    void notifyFeishuRun(config, waiting ? "需要确认" : status === "completed" ? "运行完成" : "运行失败", [
+      `技能：${runSummary.skillName}`,
+      `状态：${status}`,
+      `运行 ID：${runSummary.runId}`,
+      waiting && lastMessage ? `需要回复：${truncateForLog(lastMessage, 600)}` : "",
+      status === "failed" && runSummary.diagnostic ? `诊断：${runSummary.diagnostic}` : ""
+    ]);
     emitRunEvent(event);
   });
 }
@@ -1839,6 +2213,11 @@ async function runSkill(config: SkillSpaceConfig, request: RunSkillRequest): Pro
     logPath
   };
   await writeRunSummary(runSummary);
+  void notifyFeishuRun(config, "运行已启动", [
+    `技能：${skill.name}`,
+    `执行智能体：${request.runtime}`,
+    `运行 ID：${runId}`
+  ]);
 
   let promptForStdin: string | undefined = prompt;
   if (request.runtime === "claude") {
@@ -1980,6 +2359,7 @@ function startScheduler(): void {
 
 async function bootstrap(): Promise<BootstrapPayload> {
   const config = await ensureConfig();
+  void ensureFeishuChannel(config);
   const [agents, skills, runs, schedules] = await Promise.all([
     checkAgents(config),
     scanSkills(config),
@@ -2087,6 +2467,21 @@ app.whenReady().then(() => {
   );
   ipcMain.handle("skillspace:set-background-scheduler", async (_, enabled: boolean) =>
     setBackgroundScheduler(await ensureConfig(), enabled)
+  );
+  ipcMain.handle("skillspace:feishu-status", async () =>
+    getFeishuStatus(await ensureConfig())
+  );
+  ipcMain.handle("skillspace:feishu-connect", async (_, request: { domain?: "feishu" | "lark" }) =>
+    startFeishuConnect(await ensureConfig(), request)
+  );
+  ipcMain.handle("skillspace:feishu-save", async (_, request: SaveFeishuConfigRequest) =>
+    saveFeishuConfig(await ensureConfig(), request)
+  );
+  ipcMain.handle("skillspace:feishu-enabled", async (_, enabled: boolean) =>
+    setFeishuEnabled(await ensureConfig(), enabled)
+  );
+  ipcMain.handle("skillspace:feishu-test", async (_, message?: string) =>
+    sendFeishuTest(await ensureConfig(), message)
   );
   ipcMain.handle("skillspace:ask-llm", async (_, request: LlmAnalyzeRequest) =>
     askLlm(await ensureConfig(), request)
