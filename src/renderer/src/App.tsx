@@ -167,6 +167,7 @@ export function App(): ReactElement {
   const [scheduleDayOfMonth, setScheduleDayOfMonth] = useState(1);
   const [discoveredSkills, setDiscoveredSkills] = useState<DiscoveredSkill[]>([]);
   const [isDiscoveryOpen, setIsDiscoveryOpen] = useState(false);
+  const [isUpdateDialogOpen, setIsUpdateDialogOpen] = useState(false);
   const [isDiscovering, setIsDiscovering] = useState(false);
   const [isClassifyingTags, setIsClassifyingTags] = useState(false);
   const [llmPrompt, setLlmPrompt] = useState("");
@@ -694,6 +695,9 @@ export function App(): ReactElement {
       const status = await window.skillSpace.checkForUpdates();
       setUpdateStatus(status);
       setUpdateMessage(status.detail);
+      if (status.state === "available") {
+        setIsUpdateDialogOpen(true);
+      }
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       setUpdateStatus((current) => ({
@@ -913,7 +917,7 @@ export function App(): ReactElement {
                 updateStatus?.state === "downloaded"
                   ? void installUpdate()
                   : updateStatus?.state === "available"
-                    ? void downloadUpdate()
+                    ? setIsUpdateDialogOpen(true)
                     : void checkUpdate()
               }
               type="button"
@@ -1164,6 +1168,17 @@ export function App(): ReactElement {
           onClose={() => setIsDiscoveryOpen(false)}
           onRescan={() => void discoverExistingSkills()}
           onImportDiscovered={(root) => void importExistingSkill(root)}
+          t={t}
+        />
+      )}
+      {isUpdateDialogOpen && updateStatus?.state === "available" && (
+        <UpdateModal
+          status={updateStatus}
+          onClose={() => setIsUpdateDialogOpen(false)}
+          onDownload={() => {
+            setIsUpdateDialogOpen(false);
+            void downloadUpdate();
+          }}
           t={t}
         />
       )}
@@ -1540,6 +1555,52 @@ function DiscoveryModal({
               </div>
             ))
           )}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function UpdateModal({
+  status,
+  onClose,
+  onDownload,
+  t
+}: {
+  status: UpdateStatus;
+  onClose: () => void;
+  onDownload: () => void;
+  t: (key: string) => string;
+}): ReactElement {
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="update-modal glass-panel" role="dialog" aria-modal="true" aria-label={t("update.title")}>
+        <div className="modal-title">
+          <div>
+            <DownloadCloud size={18} />
+            <strong>{t("update.title")}</strong>
+          </div>
+          <button className="icon-button" onClick={onClose} type="button" title={t("action.close")}>
+            <X size={16} />
+          </button>
+        </div>
+        <div className="update-summary">
+          <span>{t("update.current")}: {status.currentVersion}</span>
+          <strong>{t("update.available")}: {status.availableVersion ?? t("view.none")}</strong>
+          {status.releaseName && <p>{status.releaseName}</p>}
+        </div>
+        <div className="update-notes">
+          <strong>{t("update.notes")}</strong>
+          <pre>{status.releaseNotes?.trim() || t("update.noNotes")}</pre>
+        </div>
+        <div className="modal-actions">
+          <button className="secondary-button" onClick={onClose} type="button">
+            {t("update.later")}
+          </button>
+          <button className="primary-button" onClick={onDownload} type="button">
+            <DownloadCloud size={16} />
+            <span>{t("update.download")}</span>
+          </button>
         </div>
       </section>
     </div>
@@ -2093,6 +2154,12 @@ function FeishuPanel({
           <div className="feishu-state-grid">
             <span>{t("feishu.lastEvent")}</span>
             <b>{feishuStatus?.lastEventAt ? formatDate(feishuStatus.lastEventAt, locale) : t("view.none")}</b>
+            <span>{t("feishu.lastOutbound")}</span>
+            <b>{feishuStatus?.lastOutboundAt ? formatDate(feishuStatus.lastOutboundAt, locale) : t("view.none")}</b>
+            <span>{t("feishu.deliveryStatus")}</span>
+            <b>{t(`feishu.delivery.${feishuStatus?.deliveryStatus ?? "idle"}`)}</b>
+            <span>{t("feishu.deliveryDetail")}</span>
+            <b title={feishuStatus?.deliveryDetail}>{feishuStatus?.deliveryDetail || t("view.none")}</b>
             <span>{t("feishu.receiver")}</span>
             <b>{feishuStatus?.receiveId || t("view.none")}</b>
           </div>

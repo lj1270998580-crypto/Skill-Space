@@ -57,7 +57,10 @@ let schedulerTimer: NodeJS.Timeout | null = null;
 let feishuChannel: { connect?: () => Promise<void>; disconnect?: () => Promise<void>; send?: (to: string, input: { text: string } | { markdown: string }) => Promise<unknown>; on?: (...args: unknown[]) => unknown } | null = null;
 let feishuRuntimeState: FeishuStatus["state"] = "not_configured";
 let feishuQrState: Pick<FeishuStatus, "qrDataUrl" | "qrUrl" | "qrExpiresAt"> = {};
-let feishuLastEventAt: string | undefined;
+let feishuLastInboundAt: string | undefined;
+let feishuLastOutboundAt: string | undefined;
+let feishuDeliveryStatus: FeishuStatus["deliveryStatus"] = "idle";
+let feishuDeliveryDetail: string | undefined;
 let feishuLastError: string | undefined;
 let feishuRegisterController: AbortController | null = null;
 let updateStatus: UpdateStatus = {
@@ -526,7 +529,10 @@ function feishuStatusFromConfig(stored: FeishuStoredConfig | null): FeishuStatus
     receiveId: stored?.receiveId,
     receiveIdType: stored?.receiveIdType ?? "open_id",
     ...feishuQrState,
-    lastEventAt: feishuLastEventAt,
+    lastEventAt: feishuLastInboundAt,
+    lastOutboundAt: feishuLastOutboundAt,
+    deliveryStatus: feishuDeliveryStatus,
+    deliveryDetail: feishuDeliveryDetail,
     lastError: feishuLastError,
     canSend: Boolean(enabled && configured && stored?.receiveId)
   };
@@ -564,10 +570,14 @@ async function ensureFeishuChannel(config: SkillSpaceConfig): Promise<void> {
   try {
     feishuChannel = await createFeishuChannel(stored);
     feishuChannel?.on?.("message", (message: unknown) => {
-      feishuLastEventAt = new Date().toISOString();
+      feishuLastInboundAt = new Date().toISOString();
+      feishuDeliveryStatus = "received";
+      feishuDeliveryDetail = "已收到飞书消息，正在处理。";
       feishuLastError = undefined;
       void handleFeishuMessage(config, message).catch((error: unknown) => {
         feishuLastError = error instanceof Error ? error.message : String(error);
+        feishuDeliveryStatus = "failed";
+        feishuDeliveryDetail = feishuLastError;
       });
     });
     feishuChannel?.on?.("error", (error: unknown) => {
@@ -709,12 +719,17 @@ async function sendFeishuText(config: SkillSpaceConfig, text: string): Promise<b
     return false;
   }
 
+  feishuDeliveryStatus = "sending";
+  feishuDeliveryDetail = "正在发送飞书消息。";
   try {
     if (!feishuChannel || feishuRuntimeState !== "connected") {
       await ensureFeishuChannel(config);
     }
     if (feishuChannel?.send && feishuRuntimeState === "connected") {
       await feishuChannel.send(stored.receiveId, { text });
+      feishuLastOutboundAt = new Date().toISOString();
+      feishuDeliveryStatus = "sent";
+      feishuDeliveryDetail = "飞书消息已发送。";
       return true;
     }
 
@@ -732,10 +747,15 @@ async function sendFeishuText(config: SkillSpaceConfig, text: string): Promise<b
         content: JSON.stringify({ text })
       }
     });
+    feishuLastOutboundAt = new Date().toISOString();
+    feishuDeliveryStatus = "sent";
+    feishuDeliveryDetail = "飞书消息已发送。";
     return true;
   } catch (error) {
     feishuRuntimeState = "error";
     feishuLastError = error instanceof Error ? error.message : String(error);
+    feishuDeliveryStatus = "failed";
+    feishuDeliveryDetail = feishuLastError;
     return false;
   }
 }
@@ -746,18 +766,25 @@ async function sendFeishuMarkdown(config: SkillSpaceConfig, markdown: string): P
     return false;
   }
 
+  feishuDeliveryStatus = "sending";
+  feishuDeliveryDetail = "正在发送飞书消息。";
   try {
     if (!feishuChannel || feishuRuntimeState !== "connected") {
       await ensureFeishuChannel(config);
     }
     if (feishuChannel?.send && feishuRuntimeState === "connected") {
       await feishuChannel.send(stored.receiveId, { markdown });
+      feishuLastOutboundAt = new Date().toISOString();
+      feishuDeliveryStatus = "sent";
+      feishuDeliveryDetail = "飞书消息已发送。";
       return true;
     }
     return sendFeishuText(config, markdown.replace(/\*\*/g, ""));
   } catch (error) {
     feishuRuntimeState = "error";
     feishuLastError = error instanceof Error ? error.message : String(error);
+    feishuDeliveryStatus = "failed";
+    feishuDeliveryDetail = feishuLastError;
     return false;
   }
 }
@@ -1114,9 +1141,21 @@ async function handleFeishuMessage(config: SkillSpaceConfig, rawMessage: unknown
 
   const sendReply = async (text: string): Promise<void> => {
     if (feishuChannel?.send) {
-      await feishuChannel.send(target, { text });
-      await appendFeishuConversation(config, "assistant", text);
-      return;
+      feishuDeliveryStatus = "sending";
+      feishuDeliveryDetail = "正在发送飞书回复。";
+      try {
+        await feishuChannel.send(target, { text });
+        feishuLastOutboundAt = new Date().toISOString();
+        feishuDeliveryStatus = "sent";
+        feishuDeliveryDetail = "飞书回复已发送。";
+        await appendFeishuConversation(config, "assistant", text);
+        return;
+      } catch (error) {
+        feishuLastError = error instanceof Error ? error.message : String(error);
+        feishuDeliveryStatus = "failed";
+        feishuDeliveryDetail = feishuLastError;
+        throw error;
+      }
     }
     await sendFeishuText(config, text);
     await appendFeishuConversation(config, "assistant", text);
@@ -1292,7 +1331,7 @@ async function listRuns(config: SkillSpaceConfig): Promise<RunSummary[]> {
   return runs
     .filter((run): run is RunSummary => Boolean(run))
     .map((run) =>
-      run.status === "waiting_input" && run.endedAt && run.lastMessage && !isLikelyWaitingForInput(run.lastMessage)
+      run.status === "waiting_input" && run.endedAt && run.lastMessage && !isUserDecisionRequest(run.lastMessage)
         ? { ...run, status: "completed" as const }
         : run
     )
@@ -2045,6 +2084,20 @@ function powershellSingleLine(value: string): string {
   return value.replace(/\r?\n/g, " ").replace(/\s+/g, " ").trim();
 }
 
+function isUserDecisionRequest(message: string): boolean {
+  const text = powershellSingleLine(message).toLowerCase();
+  return [
+    /(?:请|需要|等待|请你|麻烦|请回复|请从|请在|请告诉我|请提供|待用户|等待用户|需要用户).{0,60}(回复|选择|确认|输入|补充|提供|决定|决策|选题|编号|序号)/i,
+    /(回复|选择|确认|输入|补充|提供|决定|决策).{0,40}(即可|继续|后继续|后我|后再|选题|编号|序号)/i,
+    /(?:请选择|请确认|请回复|请决定|等待确认|等待回复|等待选择|需要确认|需要选择|用户确认|用户选择|用户决策)/i,
+    /(waiting for|please|need).{0,60}(reply|input|confirmation|choice|selection|decision)/i,
+    /(reply|choose|select|confirm|provide|input).{0,60}(one|option|number|choice|below|continue)/i,
+    /(?:选题|候选|方案|选项).{0,180}(?:1[\.\、:：].{0,160}2[\.\、:：])/is,
+    /(?:^|\n|\s)(?:选项|候选|编号)\s*(?:1|一)[\.\、:：]/i,
+    /(?:璇|闇|绛夊緟|璇峰洖澶).{0,60}(鍥炲|閫夋嫨|纭|杈撳叆|琛ュ厖|鎻愪緵|鍐冲畾)/i
+  ].some((pattern) => pattern.test(message) || pattern.test(text));
+}
+
 function claudeArgsFromConfig(agent: AgentConfig, sessionId?: string): string[] {
   const args = (agent.args ?? fallbackConfig.agents.claude.args ?? []).filter((arg) => arg !== "{{prompt}}");
   if (sessionId) {
@@ -2742,6 +2795,8 @@ async function executeRun(
   let outputSuggestsEmptyPrompt = false;
   let hookErrorSeen = false;
   let lastMessage = "";
+  let waitingSignalSeen = false;
+  let waitingSignalMessage = "";
   let sessionId = runSummary.sessionId;
 
   if (options.prompt && agentUsesStdinPrompt(options.runtime) && child.stdin.writable) {
@@ -2767,6 +2822,10 @@ async function executeRun(
     }
     if (parsed.lastMessage) {
       lastMessage = parsed.lastMessage;
+      if (isUserDecisionRequest(parsed.lastMessage)) {
+        waitingSignalSeen = true;
+        waitingSignalMessage = parsed.lastMessage;
+      }
     }
     if (parsed.hookError) {
       hookErrorSeen = true;
@@ -2822,7 +2881,9 @@ async function executeRun(
   child.on("close", (code) => {
     const endedAt = new Date().toISOString();
     const canComplete = (code === 0 || codexTurnCompleted) && !outputSuggestsEmptyPrompt;
-    const waiting = canComplete && lastMessage ? isLikelyWaitingForInput(lastMessage) : false;
+    const lastMessageIsWaiting = lastMessage ? isUserDecisionRequest(lastMessage) : false;
+    const waiting = canComplete && (lastMessageIsWaiting || waitingSignalSeen);
+    const waitingMessage = lastMessageIsWaiting ? lastMessage : waitingSignalMessage;
     const status =
       canComplete
         ? waiting
@@ -2841,7 +2902,7 @@ async function executeRun(
       endedAt,
       exitCode: code,
       sessionId,
-      lastMessage: lastMessage || runSummary.lastMessage,
+      lastMessage: waitingMessage || lastMessage || runSummary.lastMessage,
       diagnostic:
         status === "failed"
           ? outputSuggestsEmptyPrompt
@@ -2856,7 +2917,7 @@ async function executeRun(
       `状态：${feishuStatusLabel(status)}`,
       `执行智能体：${runSummary.runtime}`,
       `运行 ID：${runSummary.runId}`,
-      waiting && lastMessage ? `需要回复：${truncateForLog(lastMessage, 600)}` : "",
+      waiting && waitingMessage ? `需要回复：${truncateForLog(waitingMessage, 600)}` : "",
       status === "failed" && runSummary.diagnostic ? `诊断：${runSummary.diagnostic}` : ""
     ]);
     emitRunEvent(event);
@@ -3050,6 +3111,40 @@ function setUpdateStatus(next: Partial<UpdateStatus>): UpdateStatus {
   return updateStatus;
 }
 
+function stringifyReleaseNotes(notes: unknown): string | undefined {
+  if (!notes) {
+    return undefined;
+  }
+  if (typeof notes === "string") {
+    return notes;
+  }
+  if (Array.isArray(notes)) {
+    return notes
+      .map((item) => {
+        if (typeof item === "string") {
+          return item;
+        }
+        if (item && typeof item === "object") {
+          const entry = item as { version?: string; note?: string };
+          return [entry.version, entry.note].filter(Boolean).join("\n");
+        }
+        return "";
+      })
+      .filter(Boolean)
+      .join("\n\n");
+  }
+  return String(notes);
+}
+
+function updateReleaseFields(info: { version?: string; releaseName?: string | null; releaseNotes?: unknown; releaseDate?: string | null }): Partial<UpdateStatus> {
+  return {
+    availableVersion: info.version,
+    releaseName: info.releaseName ?? undefined,
+    releaseNotes: stringifyReleaseNotes(info.releaseNotes),
+    releaseDate: info.releaseDate ?? undefined
+  };
+}
+
 function configureAutoUpdater(): void {
   autoUpdater.autoDownload = false;
   autoUpdater.autoInstallOnAppQuit = false;
@@ -3066,7 +3161,7 @@ function configureAutoUpdater(): void {
     setUpdateStatus({
       state: "available",
       detail: `发现新版本 ${info.version}。`,
-      availableVersion: info.version,
+      ...updateReleaseFields(info),
       downloaded: false
     });
   });
@@ -3075,6 +3170,9 @@ function configureAutoUpdater(): void {
       state: "not_available",
       detail: "当前已经是最新版本。",
       availableVersion: undefined,
+      releaseName: undefined,
+      releaseNotes: undefined,
+      releaseDate: undefined,
       downloaded: false
     });
   });
@@ -3088,7 +3186,7 @@ function configureAutoUpdater(): void {
     setUpdateStatus({
       state: "downloaded",
       detail: `版本 ${info.version} 已下载，重启后安装。`,
-      availableVersion: info.version,
+      ...updateReleaseFields(info),
       downloaded: true
     });
   });
@@ -3119,7 +3217,15 @@ async function checkForUpdates(): Promise<UpdateStatus> {
     lastCheckedAt: new Date().toISOString(),
     error: undefined
   });
-  await autoUpdater.checkForUpdates();
+  const result = await autoUpdater.checkForUpdates();
+  if (result?.updateInfo && result.updateInfo.version !== app.getVersion()) {
+    setUpdateStatus({
+      state: "available",
+      detail: `发现新版本 ${result.updateInfo.version}。`,
+      ...updateReleaseFields(result.updateInfo),
+      downloaded: false
+    });
+  }
   return updateStatus;
 }
 

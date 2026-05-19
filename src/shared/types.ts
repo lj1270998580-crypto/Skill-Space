@@ -261,6 +261,9 @@ export interface UpdateStatus {
   state: "idle" | "checking" | "available" | "not_available" | "downloading" | "downloaded" | "error";
   detail: string;
   availableVersion?: string;
+  releaseName?: string;
+  releaseNotes?: string;
+  releaseDate?: string;
   downloaded?: boolean;
   lastCheckedAt?: string;
   error?: string;
@@ -293,6 +296,9 @@ export interface FeishuStatus {
   qrUrl?: string;
   qrExpiresAt?: string;
   lastEventAt?: string;
+  lastOutboundAt?: string;
+  deliveryStatus?: "idle" | "sending" | "sent" | "received" | "failed";
+  deliveryDetail?: string;
   lastError?: string;
   canSend: boolean;
 }

@@ -891,6 +891,56 @@ textarea:focus-visible {
   padding: 16px;
 }
 
+.update-modal {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  gap: 14px;
+  width: min(680px, calc(100vw - 72px));
+  max-height: min(680px, calc(100vh - 72px));
+  padding: 18px;
+}
+
+.update-summary {
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.42);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.update-summary span,
+.update-summary p {
+  margin: 0;
+  color: rgba(22, 33, 44, 0.66);
+}
+
+.update-notes {
+  display: grid;
+  gap: 8px;
+  min-height: 0;
+}
+
+.update-notes pre {
+  min-height: 180px;
+  max-height: 320px;
+  margin: 0;
+  padding: 12px;
+  overflow: auto;
+  white-space: pre-wrap;
+  border: 1px solid rgba(255, 255, 255, 0.42);
+  border-radius: 8px;
+  color: rgba(22, 33, 44, 0.78);
+  background: rgba(255, 255, 255, 0.16);
+  font-family: inherit;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
 .modal-title {
   display: flex;
   align-items: center;
@@ -2344,6 +2394,8 @@ textarea:focus-visible {
 
 .theme-dark .automation-task,
 .theme-dark .discovered-row,
+.theme-dark .update-summary,
+.theme-dark .update-notes pre,
 .theme-dark .automation-form input,
 .theme-dark .automation-form textarea,
 .theme-dark .feishu-form input,
@@ -2361,6 +2413,9 @@ textarea:focus-visible {
 .theme-dark .automation-times span,
 .theme-dark .discovered-row span,
 .theme-dark .discovered-row code,
+.theme-dark .update-summary span,
+.theme-dark .update-summary p,
+.theme-dark .update-notes pre,
 .theme-dark .qr-box span,
 .theme-dark .qr-stage span,
 .theme-dark .command-list span,
