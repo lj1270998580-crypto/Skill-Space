@@ -566,6 +566,13 @@ export function App(): ReactElement {
     }
   }
 
+  function clearStewardChat(): void {
+    setStewardMessages([]);
+    setLlmResult("");
+    setLlmPrompt("");
+    window.localStorage.removeItem("skillspace.stewardMessages");
+  }
+
   function toggleTheme(): void {
     setTheme((current) => {
       const next = current === "dark" ? "light" : "dark";
@@ -1007,6 +1014,7 @@ export function App(): ReactElement {
                 llmStatus={llmStatus}
                 onLlmPromptChange={setLlmPrompt}
                 onAskLlm={() => void askLlm()}
+                onClearStewardChat={clearStewardChat}
                 t={t}
                 onOpenSkills={() => setActiveView("skills")}
                 onOpenRuns={() => setActiveView("runs")}
@@ -1198,6 +1206,7 @@ function DashboardPanel({
   llmStatus,
   onLlmPromptChange,
   onAskLlm,
+  onClearStewardChat,
   t,
   onOpenSkills,
   onOpenRuns,
@@ -1214,6 +1223,7 @@ function DashboardPanel({
   llmStatus: LlmManagerStatus | null;
   onLlmPromptChange: (value: string) => void;
   onAskLlm: () => void;
+  onClearStewardChat: () => void;
   t: (key: string) => string;
   onOpenSkills: () => void;
   onOpenRuns: () => void;
@@ -1250,6 +1260,9 @@ function DashboardPanel({
           <span className={`steward-state ${llmStatus?.configured ? "ready" : "muted"}`}>
             {llmStatus?.configured ? t("llm.ready") : t("llm.notReady")}
           </span>
+          <button className="text-button compact" onClick={onClearStewardChat} type="button" disabled={isLlmBusy && stewardMessages.length === 0}>
+            {t("action.clear")}
+          </button>
         </div>
         <div className="steward-chat-body">
           <div className="steward-message-list">

@@ -467,6 +467,12 @@ textarea:focus-visible {
   background: rgba(255, 255, 255, 0.32);
 }
 
+.text-button.compact {
+  min-height: 30px;
+  padding: 5px 9px;
+  font-size: 12px;
+}
+
 .text-button.danger {
   color: #aa3d38;
 }

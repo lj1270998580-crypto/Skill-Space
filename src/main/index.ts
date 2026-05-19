@@ -830,17 +830,20 @@ function feishuStatusLabel(status: RunSummary["status"]): string {
 }
 
 async function notifyFeishuRun(config: SkillSpaceConfig, title: string, lines: string[]): Promise<void> {
+  const needsConfirmation =
+    title.includes("\u786e\u8ba4") || title.toLowerCase().includes("confirm") || title.includes("\u9700\u8981");
   const message = [
     `**Skill-Space | ${title}**`,
     "",
-    `发送时间：${formatFeishuTime(new Date())}`,
+    `\u53d1\u9001\u65f6\u95f4\uff1a${formatFeishuTime(new Date())}`,
     ...lines.filter(Boolean).map((line) => `- ${line}`),
     "",
-    title.includes("确认") ? "请直接回复选项编号，例如：1" : "可发送 /skill status 查看最近运行。"
+    needsConfirmation
+      ? "\u8bf7\u76f4\u63a5\u56de\u590d\u9009\u9879\u7f16\u53f7\u6216\u786e\u8ba4\u5185\u5bb9\uff0c\u4f8b\u5982\uff1a1\u3001A\u3001\u7528\u65b9\u6848B\u3001\u786e\u8ba4\u53d1\u5e03\u3002"
+      : "\u53ef\u53d1\u9001 /skill status \u67e5\u770b\u6700\u8fd1\u8fd0\u884c\u3002"
   ].join("\n");
   await sendFeishuMarkdown(config, message);
 }
-
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
 }
@@ -905,6 +908,32 @@ async function findWaitingRun(config: SkillSpaceConfig): Promise<RunSummary | nu
     runs.find((run) => run.status === "waiting_input" && run.runtime === "claude" && Boolean(run.sessionId)) ??
     null
   );
+}
+
+function isLikelyWaitingRunReply(content: string): boolean {
+  const text = content.trim();
+  if (!text) {
+    return false;
+  }
+  if (/^(你好|您好|hi|hello|hey|在吗|现在几点|几点了|你是谁|你能做什么)[？?。！!,.，\s]*$/i.test(text)) {
+    return false;
+  }
+  if (/[？?]/.test(text) || /(?:什么|怎么|为什么|几点|多少|介绍|说明|帮我看看)/.test(text)) {
+    return false;
+  }
+  return [
+    /^[A-Ea-e]$/,
+    /^[1-9]$/,
+    /^(?:方案|选项)?[A-Ea-e]$/,
+    /^(?:第)?[一二三四五六七八九\d]+(?:个|项|条|题|号|方案)?$/,
+    /^(?:确认|同意|可以|继续|通过|批准|发布|完成|没问题|选|选择|用|采用|按|就).{0,60}$/i,
+    /(?:确认|选择|采用|用|选).{0,24}(?:方案|选题|第|[A-Ea-e]|[1-9])/i
+  ].some((pattern) => pattern.test(text));
+}
+
+function summarizeWaitingRun(run: RunSummary): string {
+  const message = truncateForLog(run.lastMessage ?? "这个任务正在等待你的确认。", 1_200);
+  return [`任务：${run.skillName}`, `运行 ID：${run.runId}`, `等待事项：${message}`].join("\n");
 }
 
 function normalizeForSearch(value: string): string {
@@ -1006,6 +1035,84 @@ function fallbackFeishuIntent(content: string, skills: SkillSummary[]): FeishuIn
   };
 }
 
+function fallbackFeishuChatReply(content: string, waitingRun?: RunSummary | null): string {
+  if (/几点|现在时间|现在几点|time/i.test(content)) {
+    return `现在是 ${formatFeishuTime(new Date())}。`;
+  }
+  if (/^(你好|您好|hi|hello|hey)/i.test(content.trim())) {
+    return waitingRun
+      ? `你好，我是 Skill-Space 管家。当前有一个任务在等待确认，但我没有把这句话当作任务回复。\n\n${summarizeWaitingRun(waitingRun)}`
+      : "你好，我是 Skill-Space 管家。你可以直接告诉我想运行哪个技能，或问我当前任务状态。";
+  }
+  return waitingRun
+    ? `我收到你的消息了。当前还有任务等待确认；如果要继续任务，请回复明确选项，例如 1、A、用方案B、确认发布。\n\n${summarizeWaitingRun(waitingRun)}`
+    : "我收到你的消息了。你可以告诉我想执行的任务，也可以发送 /skill list 查看技能列表。";
+}
+
+async function answerFeishuChat(
+  config: SkillSpaceConfig,
+  content: string,
+  skills: SkillSummary[],
+  runs: RunSummary[],
+  conversation: LlmConversationMessage[],
+  waitingRun?: RunSummary | null
+): Promise<string> {
+  const llmConfig = (await readLlmConfig(config)) ?? defaultLlmConfig();
+  if (!llmConfig.enabled) {
+    return fallbackFeishuChatReply(content, waitingRun);
+  }
+
+  try {
+    return await callConfiguredLlm(
+      config,
+      [
+        skillSpaceStewardIdentity(),
+        "",
+        "你正在飞书里直接和用户对话。请自由、自然地回答用户，不要只返回固定模板。",
+        "如果用户是在闲聊、问时间、问你是谁、问应用状态，请直接回答。",
+        "只有当用户明确要求运行某个技能时，才建议使用 /skill run 或让应用调度技能。",
+        "如果存在等待确认的任务，但用户消息不像明确选择或确认，不要把它当作任务回复；可以提醒用户当前等待事项。",
+        "",
+        `当前时间：${new Date().toLocaleString("zh-CN", { hour12: false })}`,
+        "",
+        "等待确认任务：",
+        waitingRun ? summarizeWaitingRun(waitingRun) : "无",
+        "",
+        "最近运行：",
+        JSON.stringify(
+          runs.slice(0, 6).map((run) => ({
+            skillName: run.skillName,
+            status: run.status,
+            startedAt: run.startedAt,
+            lastMessage: run.lastMessage ? truncateForLog(run.lastMessage, 300) : undefined
+          })),
+          null,
+          2
+        ),
+        "",
+        "可用技能摘要：",
+        JSON.stringify(
+          skills.slice(0, 12).map((skill) => ({
+            id: skill.id,
+            name: skill.name,
+            description: skill.description
+          })),
+          null,
+          2
+        ),
+        "",
+        "最近飞书对话：",
+        formatConversationHistory(conversation),
+        "",
+        `用户消息：${content}`
+      ].join("\n")
+    );
+  } catch (error) {
+    feishuLastError = error instanceof Error ? error.message : String(error);
+    return fallbackFeishuChatReply(content, waitingRun);
+  }
+}
+
 async function readFeishuConversation(config: SkillSpaceConfig): Promise<LlmConversationMessage[]> {
   const messages = await readJsonFile<LlmConversationMessage[]>(feishuConversationPath(config));
   return (messages ?? []).filter((item) => item.role === "user" || item.role === "assistant").slice(-20);
@@ -1023,11 +1130,11 @@ async function appendFeishuConversation(config: SkillSpaceConfig, role: LlmConve
 
 function formatConversationHistory(messages: LlmConversationMessage[]): string {
   if (messages.length === 0) {
-    return "暂无。";
+    return "none";
   }
   return messages
     .slice(-10)
-    .map((message) => `${message.role === "user" ? "用户" : "管家"}：${message.content}`)
+    .map((message) => `${message.role === "user" ? "user" : "assistant"}: ${message.content}`)
     .join("\n");
 }
 
@@ -1092,7 +1199,9 @@ async function dispatchFeishuIntent(
   config: SkillSpaceConfig,
   content: string,
   intent: FeishuIntent,
-  sendReply: (text: string) => Promise<void>
+  sendReply: (text: string) => Promise<void>,
+  conversation: LlmConversationMessage[] = [],
+  waitingRun?: RunSummary | null
 ): Promise<void> {
   const skills = await scanSkills(config);
   const runs = await listRuns(config);
@@ -1127,7 +1236,7 @@ async function dispatchFeishuIntent(
     return;
   }
 
-  await sendReply(intent.reply || "我已收到。你可以告诉我想执行的技能和目标，我会帮你调度。");
+  await sendReply(await answerFeishuChat(config, content, skills, runs, conversation, waitingRun));
 }
 
 async function handleFeishuMessage(config: SkillSpaceConfig, rawMessage: unknown): Promise<void> {
@@ -1168,17 +1277,17 @@ async function handleFeishuMessage(config: SkillSpaceConfig, rawMessage: unknown
 
   if (!content.startsWith("/skill")) {
     const waitingRun = await findWaitingRun(config);
-    if (waitingRun) {
+    if (waitingRun && isLikelyWaitingRunReply(content)) {
       try {
         await continueRun(config, {
           runId: waitingRun.runId,
           input: content
         });
-        await sendReply(`已把「${content}」发送到任务：${waitingRun.skillName}`);
+        await sendReply(`\u5df2\u628a\u300c${content}\u300d\u53d1\u9001\u5230\u4efb\u52a1\uff1a${waitingRun.skillName}`);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         feishuLastError = message;
-        await sendReply(`收到「${content}」，但转发到任务失败：${message}`);
+        await sendReply(`\u6536\u5230\u300c${content}\u300d\uff0c\u4f46\u8f6c\u53d1\u5230\u4efb\u52a1\u5931\u8d25\uff1a${message}`);
       }
       return;
     }
@@ -1187,7 +1296,7 @@ async function handleFeishuMessage(config: SkillSpaceConfig, rawMessage: unknown
     const runs = await listRuns(config);
     const conversation = await readFeishuConversation(config);
     const intent = await classifyFeishuIntent(config, content, skills, runs, conversation);
-    await dispatchFeishuIntent(config, content, intent, sendReply);
+    await dispatchFeishuIntent(config, content, intent, sendReply, conversation, waitingRun);
     return;
   }
 
@@ -2590,6 +2699,7 @@ async function askLlm(config: SkillSpaceConfig, request: LlmAnalyzeRequest): Pro
       skillSpaceStewardIdentity(),
       "",
       "以下是当前应用上下文，请基于它回答：",
+      `当前时间：${new Date().toLocaleString("zh-CN", { hour12: false })}`,
       buildSkillSpaceContext(config, skills, runs, schedules, agents, feishu, skill, run),
       "",
       "最近对话上下文：",
