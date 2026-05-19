@@ -1,6 +1,6 @@
 {
   "name": "skill-space",
-  "version": "0.1.0",
+  "version": "0.1.5",
   "private": true,
   "type": "module",
   "main": "out/main/index.js",
@@ -19,6 +19,7 @@
     "@types/qrcode": "^1.5.6",
     "@vitejs/plugin-react": "^5.1.1",
     "@xyflow/react": "^12.10.0",
+    "electron-updater": "^6.8.3",
     "electron-vite": "^4.0.0",
     "lucide-react": "^0.561.0",
     "qrcode": "^1.5.4",
@@ -41,6 +42,12 @@
     "directories": {
       "output": "release"
     },
+    "publish": [
+      {
+        "provider": "generic",
+        "url": "https://ailabing.cn/downloads/skill-space/"
+      }
+    ],
     "electronDist": "node_modules/electron/dist",
     "files": [
       "out/**/*",

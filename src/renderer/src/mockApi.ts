@@ -261,7 +261,43 @@ export function installMockApiWhenMissing(): void {
       receiveIdType: "open_id",
       canSend: true
     }),
+    getLlmStatus: async () => ({
+      enabled: true,
+      configured: true,
+      provider: "claude-code",
+      model: "skill-space-steward",
+      identity: "Skill-Space 管家",
+      detail: "Mock preview Skill-Space steward is ready."
+    }),
+    saveLlmConfig: async (request) => ({
+      enabled: request.enabled,
+      configured: true,
+      provider: request.provider,
+      model: request.model,
+      baseUrl: request.baseUrl,
+      identity: "Skill-Space 管家",
+      detail: "Mock preview LLM config saved."
+    }),
     askLlm: async () => ({ result: "这是 Skill-Space 的本地 LLM 分析结果预览。" }),
+    getUpdateStatus: async () => ({
+      currentVersion: "0.1.1",
+      state: "idle",
+      detail: "Mock preview updater is ready."
+    }),
+    checkForUpdates: async () => ({
+      currentVersion: "0.1.1",
+      state: "not_available",
+      detail: "Mock preview is already up to date.",
+      lastCheckedAt: now
+    }),
+    downloadUpdate: async () => ({
+      currentVersion: "0.1.1",
+      state: "downloaded",
+      detail: "Mock preview update downloaded.",
+      availableVersion: "0.1.1",
+      downloaded: true
+    }),
+    installUpdate: async () => undefined,
     minimizeWindow: async () => {
       document.body.classList.add("preview-minimized");
       window.setTimeout(() => document.body.classList.remove("preview-minimized"), 700);

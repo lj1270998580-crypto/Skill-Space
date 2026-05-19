@@ -274,6 +274,24 @@ textarea:focus-visible {
   align-items: center;
 }
 
+.top-status-copy {
+  max-width: 220px;
+  overflow: hidden;
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.42);
+  border-radius: 8px;
+  color: rgba(22, 33, 44, 0.7);
+  background: rgba(255, 255, 255, 0.28);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.top-status-copy.error {
+  color: #9e3631;
+  background: rgba(255, 221, 217, 0.34);
+}
+
 .window-controls {
   display: inline-flex;
   gap: 6px;
@@ -369,6 +387,34 @@ textarea:focus-visible {
   background: #d64a42;
 }
 
+.update-top-status {
+  position: relative;
+}
+
+.update-top-status.available,
+.update-top-status.downloaded {
+  color: #07343b;
+  background: linear-gradient(145deg, rgba(132, 226, 215, 0.7), rgba(255, 218, 151, 0.54));
+}
+
+.update-top-status.error::after,
+.update-top-status.available::after,
+.update-top-status.downloaded::after {
+  position: absolute;
+  right: 7px;
+  bottom: 7px;
+  width: 8px;
+  height: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.72);
+  border-radius: 50%;
+  content: "";
+  background: #23ba82;
+}
+
+.update-top-status.error::after {
+  background: #d64a42;
+}
+
 .primary-button {
   display: inline-flex;
   align-items: center;
@@ -447,6 +493,10 @@ textarea:focus-visible {
   min-height: 0;
 }
 
+.content-grid.no-inspector {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .main-stage {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
@@ -500,14 +550,18 @@ textarea:focus-visible {
   justify-content: flex-end;
 }
 
+.dashboard-actions .secondary-button,
 .dashboard-skill-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 8px;
-  width: 120px;
-  height: 36px;
+  width: 138px;
+  height: 40px;
   padding: 0 12px;
+}
+
+.dashboard-skill-button {
   color: #17353a;
   background: rgba(209, 247, 243, 0.48);
   border: 1px solid rgba(94, 166, 166, 0.34);
@@ -567,6 +621,88 @@ textarea:focus-visible {
 
 .runtime-pill b {
   font-size: 12px;
+}
+
+.steward-chat {
+  min-height: 320px;
+}
+
+.steward-state {
+  padding: 5px 8px;
+  border-radius: 999px;
+  color: #126a58;
+  background: rgba(95, 220, 196, 0.18);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.steward-state.muted {
+  color: rgba(22, 33, 44, 0.56);
+  background: rgba(255, 255, 255, 0.24);
+}
+
+.steward-chat-body {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  gap: 12px;
+  min-height: 0;
+}
+
+.steward-message-list {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  min-height: 0;
+  overflow: auto;
+}
+
+.steward-message {
+  overflow-wrap: anywhere;
+  padding: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.48);
+  border-radius: 8px;
+  color: rgba(22, 33, 44, 0.76);
+  background: rgba(255, 255, 255, 0.24);
+}
+
+.steward-message.user {
+  margin-left: 42px;
+  background: rgba(113, 223, 210, 0.18);
+  border-color: rgba(85, 199, 190, 0.34);
+}
+
+.steward-message.assistant {
+  margin-right: 22px;
+}
+
+.steward-message strong {
+  display: block;
+  margin-bottom: 8px;
+}
+
+.steward-message p {
+  margin: 0;
+  white-space: pre-wrap;
+  line-height: 1.65;
+}
+
+.steward-input-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: end;
+}
+
+.steward-input-row textarea {
+  min-height: 74px;
+  max-height: 150px;
+  resize: vertical;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.62);
+  border-radius: 8px;
+  color: #16212c;
+  background: rgba(255, 255, 255, 0.38);
+  outline: none;
 }
 
 .recent-list {
@@ -937,8 +1073,9 @@ textarea:focus-visible {
 }
 
 .settings-grid {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   align-content: start;
+  padding: 2px;
 }
 
 .automation-grid {
@@ -1376,6 +1513,8 @@ textarea:focus-visible {
   grid-column: 1 / -1;
   grid-template-columns: minmax(0, 1fr);
   align-items: stretch;
+  min-height: auto;
+  padding: 18px;
 }
 
 .settings-card.settings-wide p {
@@ -1417,6 +1556,54 @@ textarea:focus-visible {
   grid-column: auto;
 }
 
+.llm-config-grid {
+  display: grid;
+  grid-template-columns: minmax(138px, 0.55fr) minmax(220px, 1fr) minmax(200px, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.llm-config-grid input {
+  min-width: 0;
+  height: 38px;
+  padding: 0 10px;
+  border: 1px solid rgba(255, 255, 255, 0.58);
+  border-radius: 8px;
+  color: #16212c;
+  background: rgba(255, 255, 255, 0.38);
+  outline: none;
+}
+
+.llm-config-grid .switch-row {
+  grid-column: auto;
+}
+
+.inline-status {
+  padding: 10px 12px;
+  border: 1px solid rgba(104, 206, 194, 0.36);
+  border-radius: 8px;
+  color: rgba(18, 106, 88, 0.9);
+  background: rgba(104, 206, 194, 0.14);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.llm-chat-card {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.llm-chat-card .section-title,
+.llm-chat-card p,
+.llm-chat-card textarea,
+.llm-chat-card .llm-result {
+  grid-column: 1 / -1;
+}
+
+.llm-chat-card textarea {
+  min-height: 108px;
+  resize: vertical;
+}
+
 .scheduler-status {
   display: grid;
   grid-column: 2;
@@ -1444,16 +1631,66 @@ textarea:focus-visible {
   white-space: nowrap;
 }
 
-.feishu-card {
-  align-items: start;
+.feishu-page {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 14px;
+  min-height: 0;
+  overflow: auto;
+  padding: 2px;
 }
 
-.feishu-card p,
-.feishu-card .connection-badge,
-.feishu-card .qr-box,
-.feishu-card .feishu-form,
-.feishu-card .feishu-actions {
-  grid-column: 2;
+.feishu-hero {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  min-height: 138px;
+  padding: 22px;
+}
+
+.feishu-hero span {
+  color: rgba(22, 33, 44, 0.58);
+  font-size: 12px;
+}
+
+.feishu-hero strong {
+  display: block;
+  margin-top: 8px;
+  font-size: 28px;
+}
+
+.feishu-hero p,
+.feishu-card p {
+  margin: 10px 0 0;
+  color: rgba(22, 33, 44, 0.66);
+  line-height: 1.6;
+}
+
+.feishu-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 14px;
+  align-items: stretch;
+}
+
+.feishu-primary-grid,
+.feishu-secondary-grid {
+  display: grid;
+  grid-template-columns: minmax(320px, 0.9fr) minmax(420px, 1.1fr);
+  gap: 14px;
+  align-items: stretch;
+}
+
+.feishu-card {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+  padding: 16px;
+}
+
+.feishu-connect-card {
+  align-content: start;
 }
 
 .connection-badge {
@@ -1466,6 +1703,12 @@ textarea:focus-visible {
   border: 1px solid rgba(255, 255, 255, 0.44);
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.2);
+}
+
+.connection-badge.large {
+  min-height: 36px;
+  padding: 0 14px;
+  font-size: 14px;
 }
 
 .connection-badge span {
@@ -1491,9 +1734,10 @@ textarea:focus-visible {
   box-shadow: 0 0 0 4px rgba(214, 74, 66, 0.16);
 }
 
-.qr-box {
+.qr-box,
+.qr-stage {
   display: grid;
-  justify-items: start;
+  justify-items: center;
   gap: 8px;
   padding: 10px;
   border: 1px solid rgba(255, 255, 255, 0.44);
@@ -1501,16 +1745,30 @@ textarea:focus-visible {
   background: rgba(255, 255, 255, 0.2);
 }
 
-.qr-box img {
-  width: 128px;
-  height: 128px;
+.qr-box img,
+.qr-stage img {
+  width: 220px;
+  height: 220px;
   border-radius: 8px;
   background: #fff;
 }
 
-.qr-box span {
+.qr-box span,
+.qr-stage span {
   color: rgba(22, 33, 44, 0.62);
   font-size: 12px;
+}
+
+.qr-placeholder {
+  display: grid;
+  place-items: center;
+  gap: 12px;
+  width: 220px;
+  height: 220px;
+  border: 1px dashed rgba(25, 68, 78, 0.22);
+  border-radius: 8px;
+  color: rgba(22, 33, 44, 0.5);
+  background: rgba(255, 255, 255, 0.22);
 }
 
 .feishu-form {
@@ -1534,6 +1792,122 @@ textarea:focus-visible {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+  align-items: center;
+}
+
+.feishu-actions .switch-row {
+  grid-column: auto;
+}
+
+.feishu-error {
+  margin: 0;
+  padding: 10px;
+  overflow: auto;
+  white-space: pre-wrap;
+  border-radius: 8px;
+  color: #a7352f;
+  background: rgba(255, 221, 217, 0.34);
+  font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+}
+
+.feishu-state-grid {
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr);
+  gap: 8px 12px;
+  padding: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.44);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.18);
+}
+
+.feishu-state-grid span {
+  color: rgba(22, 33, 44, 0.58);
+  font-size: 12px;
+}
+
+.feishu-state-grid b {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.feishu-message-preview {
+  align-self: stretch;
+}
+
+.feishu-message-preview .section-title time {
+  color: rgba(22, 33, 44, 0.58);
+  font-size: 12px;
+}
+
+.feishu-message-stack {
+  display: grid;
+  gap: 10px;
+}
+
+.feishu-message-card {
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.44);
+  border-radius: 8px;
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.34), rgba(255, 255, 255, 0.12)),
+    rgba(255, 255, 255, 0.12);
+}
+
+.feishu-message-card.active {
+  border-color: rgba(88, 207, 195, 0.44);
+}
+
+.feishu-message-card.waiting {
+  border-color: rgba(219, 178, 83, 0.44);
+}
+
+.feishu-message-card span {
+  width: max-content;
+  padding: 3px 8px;
+  border-radius: 999px;
+  color: rgba(5, 45, 51, 0.74);
+  background: rgba(111, 217, 204, 0.22);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.feishu-message-card.waiting span {
+  background: rgba(238, 194, 91, 0.24);
+}
+
+.feishu-message-card strong {
+  font-size: 15px;
+}
+
+.feishu-message-card p {
+  margin: 0;
+  font-size: 12px;
+}
+
+.command-list {
+  display: grid;
+  grid-template-columns: minmax(0, 230px) minmax(0, 1fr);
+  gap: 10px 12px;
+  align-items: center;
+}
+
+.command-list code {
+  overflow-wrap: anywhere;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.32);
+  font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+}
+
+.command-list span {
+  color: rgba(22, 33, 44, 0.62);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .settings-card strong {
@@ -1925,6 +2299,8 @@ textarea:focus-visible {
 .theme-dark .skill-card span,
 .theme-dark .dashboard-hero span,
 .theme-dark .dashboard-hero p,
+.theme-dark .feishu-hero span,
+.theme-dark .feishu-hero p,
 .theme-dark .runtime-pill span,
 .theme-dark .recent-row span,
 .theme-dark .run-history-row > div span,
@@ -1971,6 +2347,8 @@ textarea:focus-visible {
 .theme-dark .automation-form input,
 .theme-dark .automation-form textarea,
 .theme-dark .feishu-form input,
+.theme-dark .llm-config-grid input,
+.theme-dark .feishu-message-card,
 .theme-dark .settings-card textarea,
 .theme-dark .llm-result {
   color: #eaf7f5;
@@ -1984,8 +2362,17 @@ textarea:focus-visible {
 .theme-dark .discovered-row span,
 .theme-dark .discovered-row code,
 .theme-dark .qr-box span,
+.theme-dark .qr-stage span,
+.theme-dark .command-list span,
+.theme-dark .feishu-message-card p,
+.theme-dark .feishu-message-preview .section-title time,
+.theme-dark .steward-message p,
 .theme-dark .settings-card.settings-wide p {
-  color: rgba(234, 247, 245, 0.62);
+  color: rgba(234, 247, 245, 0.74);
+}
+
+.theme-dark .feishu-message-card span {
+  color: rgba(234, 247, 245, 0.82);
 }
 
 .theme-dark .row-delete {
@@ -2001,6 +2388,22 @@ textarea:focus-visible {
 .theme-dark .primary-button {
   color: #061414;
   background: linear-gradient(145deg, rgba(94, 241, 224, 0.88), rgba(255, 210, 123, 0.74));
+}
+
+.theme-dark .steward-message,
+.theme-dark .steward-input-row textarea {
+  color: #eaf7f5;
+  background: rgba(6, 18, 25, 0.64);
+  border-color: rgba(214, 255, 250, 0.18);
+}
+
+.theme-dark .steward-message.user {
+  background: rgba(85, 210, 197, 0.16);
+  border-color: rgba(105, 230, 218, 0.28);
+}
+
+.theme-dark .steward-message strong {
+  color: #f4fffd;
 }
 
 .theme-dark .dashboard-skill-button {
@@ -2090,9 +2493,22 @@ textarea:focus-visible {
 }
 
 .theme-dark .connection-badge,
-.theme-dark .qr-box {
+.theme-dark .qr-box,
+.theme-dark .qr-stage,
+.theme-dark .qr-placeholder,
+.theme-dark .feishu-state-grid,
+.theme-dark .command-list code {
   background: rgba(255, 255, 255, 0.06);
   border-color: rgba(214, 255, 250, 0.14);
+}
+
+.theme-dark .feishu-state-grid span {
+  color: rgba(234, 247, 245, 0.62);
+}
+
+.theme-dark .feishu-error {
+  color: #ffc7c1;
+  background: rgba(155, 35, 31, 0.2);
 }
 
 .theme-dark .scheduler-status b {

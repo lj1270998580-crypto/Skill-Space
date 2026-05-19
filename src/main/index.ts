@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { cp, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import QRCode from "qrcode";
 import type {
@@ -21,20 +22,26 @@ import type {
   ImportSkillResponse,
   LlmAnalyzeRequest,
   LlmAnalyzeResponse,
+  LlmManagerStatus,
+  LlmProvider,
   RunEvent,
   RunArtifact,
   RunSkillRequest,
   RunSkillResponse,
   RunSummary,
   SaveFeishuConfigRequest,
+  SaveLlmConfigRequest,
   ScheduledTask,
   SkillChange,
   SkillDetail,
   SkillFileEntry,
   SkillSpaceConfig,
-  SkillSummary
+  SkillSummary,
+  UpdateStatus
 } from "../shared/types";
 
+const nodeRequire = createRequire(import.meta.url);
+const { autoUpdater } = nodeRequire("electron-updater") as typeof import("electron-updater");
 const configPath = "D:\\Skill-Space\\config\\skillspace.config.json";
 
 function bundledResourcePath(fileName: string): string {
@@ -53,6 +60,11 @@ let feishuQrState: Pick<FeishuStatus, "qrDataUrl" | "qrUrl" | "qrExpiresAt"> = {
 let feishuLastEventAt: string | undefined;
 let feishuLastError: string | undefined;
 let feishuRegisterController: AbortController | null = null;
+let updateStatus: UpdateStatus = {
+  currentVersion: app.getVersion(),
+  state: "idle",
+  detail: "在线更新已就绪。"
+};
 
 type FeishuStoredConfig = {
   schemaVersion: "skillspace.feishu.v1";
@@ -63,6 +75,30 @@ type FeishuStoredConfig = {
   receiveIdType: FeishuReceiveIdType;
   createdAt: string;
   updatedAt: string;
+};
+
+type LlmStoredConfig = {
+  schemaVersion: "skillspace.llm.v1";
+  enabled: boolean;
+  provider: LlmProvider;
+  model: string;
+  baseUrl?: string;
+  encryptedApiKey?: string;
+  updatedAt: string;
+};
+
+type FeishuIntent = {
+  action: "run_skill" | "list_skills" | "status" | "help" | "chat";
+  skillId?: string;
+  input?: string;
+  reply?: string;
+  confidence?: number;
+};
+
+type LlmConversationMessage = {
+  role: "user" | "assistant";
+  content: string;
+  at?: string;
 };
 
 const fallbackConfig: SkillSpaceConfig = {
@@ -367,6 +403,14 @@ function feishuConfigPath(config: SkillSpaceConfig): string {
   return join(config.dataRoot, "config", "feishu.config.json");
 }
 
+function feishuConversationPath(config: SkillSpaceConfig): string {
+  return join(config.dataRoot, "config", "feishu.conversation.json");
+}
+
+function llmConfigPath(config: SkillSpaceConfig): string {
+  return join(config.dataRoot, "config", "llm.config.json");
+}
+
 function encryptSecret(value: string): string {
   if (safeStorage.isEncryptionAvailable()) {
     return `safe:${safeStorage.encryptString(value).toString("base64")}`;
@@ -390,6 +434,65 @@ async function readFeishuConfig(config: SkillSpaceConfig): Promise<FeishuStoredC
 
 async function writeFeishuConfig(config: SkillSpaceConfig, value: FeishuStoredConfig): Promise<void> {
   await writeJsonFile(feishuConfigPath(config), value);
+}
+
+async function readLlmConfig(config: SkillSpaceConfig): Promise<LlmStoredConfig | null> {
+  return readJsonFile<LlmStoredConfig>(llmConfigPath(config));
+}
+
+async function writeLlmConfig(config: SkillSpaceConfig, value: LlmStoredConfig): Promise<void> {
+  await writeJsonFile(llmConfigPath(config), value);
+}
+
+function defaultLlmConfig(): LlmStoredConfig {
+  return {
+    schemaVersion: "skillspace.llm.v1",
+    enabled: true,
+    provider: "claude-code",
+    model: "skill-space-steward",
+    updatedAt: new Date().toISOString()
+  };
+}
+
+const llmProviderDefaults: Record<LlmProvider, { model: string; baseUrl?: string; needsApiKey: boolean }> = {
+  "claude-code": { model: "skill-space-steward", needsApiKey: false },
+  openai: { model: "gpt-4o-mini", baseUrl: "https://api.openai.com/v1", needsApiKey: true },
+  deepseek: { model: "deepseek-chat", baseUrl: "https://api.deepseek.com/v1", needsApiKey: true },
+  qwen: { model: "qwen-plus", baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", needsApiKey: true },
+  kimi: { model: "moonshot-v1-8k", baseUrl: "https://api.moonshot.cn/v1", needsApiKey: true },
+  gemini: { model: "gemini-2.5-flash", baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai", needsApiKey: true },
+  zhipu: { model: "glm-4-flash", baseUrl: "https://open.bigmodel.cn/api/paas/v4", needsApiKey: true },
+  volcengine: { model: "doubao-seed-1-6", baseUrl: "https://ark.cn-beijing.volces.com/api/v3", needsApiKey: true },
+  siliconflow: { model: "Qwen/Qwen2.5-7B-Instruct", baseUrl: "https://api.siliconflow.cn/v1", needsApiKey: true },
+  openrouter: { model: "openai/gpt-4o-mini", baseUrl: "https://openrouter.ai/api/v1", needsApiKey: true },
+  groq: { model: "llama-3.3-70b-versatile", baseUrl: "https://api.groq.com/openai/v1", needsApiKey: true },
+  lmstudio: { model: "local-model", baseUrl: "http://127.0.0.1:1234/v1", needsApiKey: false },
+  vllm: { model: "local-model", baseUrl: "http://127.0.0.1:8000/v1", needsApiKey: false },
+  ollama: { model: "llama3.1", baseUrl: "http://127.0.0.1:11434", needsApiKey: false },
+  "openai-compatible": { model: "gpt-4o-mini", baseUrl: "https://api.openai.com/v1", needsApiKey: true }
+};
+
+function llmStatusFromConfig(stored: LlmStoredConfig | null): LlmManagerStatus {
+  const current = stored ?? defaultLlmConfig();
+  const defaults = llmProviderDefaults[current.provider] ?? llmProviderDefaults["openai-compatible"];
+  const configured =
+    current.provider === "claude-code" ||
+    current.provider === "ollama" ||
+    !defaults.needsApiKey ||
+    Boolean(current.encryptedApiKey && current.baseUrl && current.model);
+  return {
+    enabled: current.enabled,
+    configured,
+    provider: current.provider,
+    model: current.model,
+    baseUrl: current.baseUrl,
+    identity: "Skill-Space 管家",
+    detail: current.enabled
+      ? configured
+        ? "Skill-Space 管家已就绪，会理解技能库、运行历史、自动化和飞书协同上下文。"
+        : "请补全模型配置后启用 Skill-Space 管家。"
+      : "Skill-Space 管家已关闭，应用会使用规则逻辑兜底。"
+  };
 }
 
 function feishuStatusFromConfig(stored: FeishuStoredConfig | null): FeishuStatus {
@@ -462,7 +565,10 @@ async function ensureFeishuChannel(config: SkillSpaceConfig): Promise<void> {
     feishuChannel = await createFeishuChannel(stored);
     feishuChannel?.on?.("message", (message: unknown) => {
       feishuLastEventAt = new Date().toISOString();
-      void handleFeishuMessage(config, message);
+      feishuLastError = undefined;
+      void handleFeishuMessage(config, message).catch((error: unknown) => {
+        feishuLastError = error instanceof Error ? error.message : String(error);
+      });
     });
     feishuChannel?.on?.("error", (error: unknown) => {
       feishuRuntimeState = "error";
@@ -499,7 +605,7 @@ async function startFeishuConnect(
   const qrReady = new Promise<void>((resolveQr) => {
     void lark
       .registerApp({
-        domain: request.domain === "lark" ? "https://open.larksuite.com" : "https://open.feishu.cn",
+        domain: request.domain === "lark" ? "accounts.larksuite.com" : "accounts.feishu.cn",
         source: "Skill-Space",
         signal: feishuRegisterController?.signal,
         onQRCodeReady: async (info: { url: string; expireIn: number }) => {
@@ -634,30 +740,374 @@ async function sendFeishuText(config: SkillSpaceConfig, text: string): Promise<b
   }
 }
 
+async function sendFeishuMarkdown(config: SkillSpaceConfig, markdown: string): Promise<boolean> {
+  const stored = await readFeishuConfig(config);
+  if (!stored?.enabled || !stored.receiveId) {
+    return false;
+  }
+
+  try {
+    if (!feishuChannel || feishuRuntimeState !== "connected") {
+      await ensureFeishuChannel(config);
+    }
+    if (feishuChannel?.send && feishuRuntimeState === "connected") {
+      await feishuChannel.send(stored.receiveId, { markdown });
+      return true;
+    }
+    return sendFeishuText(config, markdown.replace(/\*\*/g, ""));
+  } catch (error) {
+    feishuRuntimeState = "error";
+    feishuLastError = error instanceof Error ? error.message : String(error);
+    return false;
+  }
+}
+
 async function sendFeishuTest(config: SkillSpaceConfig, message?: string): Promise<FeishuStatus> {
-  await sendFeishuText(config, message?.trim() || "Skill-Space 飞书通信测试：连接可用。");
+  const sentAt = formatFeishuTime(new Date());
+  await sendFeishuMarkdown(
+    config,
+    message?.trim() ||
+      [
+        "**Skill-Space 通信测试**",
+        "",
+        `发送时间：${sentAt}`,
+        "状态：连接可用",
+        "",
+        "手机端可以接收任务状态、发送 /skill 指令，也可以在任务等待确认时直接回复选项。"
+      ].join("\n")
+  );
   return getFeishuStatus(config);
 }
 
-async function notifyFeishuRun(config: SkillSpaceConfig, title: string, lines: string[]): Promise<void> {
-  const message = [`【Skill-Space】${title}`, ...lines.filter(Boolean)].join("\n");
-  await sendFeishuText(config, message);
+function formatFeishuTime(date: Date): string {
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false
+  }).format(date);
 }
 
-async function handleFeishuMessage(config: SkillSpaceConfig, rawMessage: unknown): Promise<void> {
-  const message = rawMessage as {
-    content?: string;
-    chatId?: string;
-    senderId?: string;
-    replyToMessageId?: string;
+function feishuStatusLabel(status: RunSummary["status"]): string {
+  const labels: Record<RunSummary["status"], string> = {
+    running: "运行中",
+    waiting_input: "等待确认",
+    completed: "已完成",
+    failed: "失败",
+    cancelled: "已取消",
+    unknown: "未知"
   };
-  const content = (message.content ?? "").trim();
-  if (!content.startsWith("/skill")) {
+  return labels[status] ?? status;
+}
+
+async function notifyFeishuRun(config: SkillSpaceConfig, title: string, lines: string[]): Promise<void> {
+  const message = [
+    `**Skill-Space | ${title}**`,
+    "",
+    `发送时间：${formatFeishuTime(new Date())}`,
+    ...lines.filter(Boolean).map((line) => `- ${line}`),
+    "",
+    title.includes("确认") ? "请直接回复选项编号，例如：1" : "可发送 /skill status 查看最近运行。"
+  ].join("\n");
+  await sendFeishuMarkdown(config, message);
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+}
+
+function nestedRecord(source: Record<string, unknown>, key: string): Record<string, unknown> {
+  return asRecord(source[key]);
+}
+
+function firstString(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+  return undefined;
+}
+
+function extractFeishuMessageText(rawMessage: unknown): string {
+  const message = asRecord(rawMessage);
+  const rawEvent = nestedRecord(message, "event");
+  const rawMessageBody = nestedRecord(message, "message");
+  const eventMessageBody = nestedRecord(rawEvent, "message");
+  const raw = firstString(message.content, message.text, rawMessageBody.content, eventMessageBody.content) ?? "";
+  if (!raw) {
+    return "";
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as { text?: string; content?: string };
+    return String(parsed.text ?? parsed.content ?? raw).trim();
+  } catch {
+    return raw;
+  }
+}
+
+function extractFeishuMessageTarget(rawMessage: unknown, stored: FeishuStoredConfig | null): string | undefined {
+  const message = asRecord(rawMessage);
+  const rawEvent = nestedRecord(message, "event");
+  const rawMessageBody = nestedRecord(message, "message");
+  const eventMessageBody = nestedRecord(rawEvent, "message");
+  const rawSender = nestedRecord(message, "sender");
+  const eventSender = nestedRecord(rawEvent, "sender");
+  const rawSenderId = nestedRecord(rawSender, "sender_id");
+  const eventSenderId = nestedRecord(eventSender, "sender_id");
+
+  return firstString(
+    message.chatId,
+    message.chat_id,
+    rawMessageBody.chat_id,
+    eventMessageBody.chat_id,
+    message.senderId,
+    message.sender_id,
+    rawSenderId.open_id,
+    eventSenderId.open_id,
+    stored?.receiveId
+  );
+}
+
+async function findWaitingRun(config: SkillSpaceConfig): Promise<RunSummary | null> {
+  const runs = await listRuns(config);
+  return (
+    runs.find((run) => run.status === "waiting_input" && run.runtime === "claude" && Boolean(run.sessionId)) ??
+    null
+  );
+}
+
+function normalizeForSearch(value: string): string {
+  return value.toLowerCase().replace(/[\s_\-.:：、，。/\\]+/g, "");
+}
+
+function findSkillByText(skills: SkillSummary[], text: string, explicitToken?: string): SkillSummary | undefined {
+  const tokens = [explicitToken, text].filter((item): item is string => Boolean(item?.trim()));
+  for (const token of tokens) {
+    const raw = token.trim().toLowerCase();
+    const normalized = normalizeForSearch(token);
+    const exact = skills.find((skill) => {
+      const id = skill.id.toLowerCase();
+      const name = skill.name.toLowerCase();
+      return id === raw || name === raw || normalizeForSearch(skill.id) === normalized || normalizeForSearch(skill.name) === normalized;
+    });
+    if (exact) {
+      return exact;
+    }
+  }
+
+  const normalizedText = normalizeForSearch(text);
+  return skills.find((skill) => {
+    const id = normalizeForSearch(skill.id);
+    const name = normalizeForSearch(skill.name);
+    return (id.length > 2 && normalizedText.includes(id)) || (name.length > 2 && normalizedText.includes(name));
+  });
+}
+
+function formatFeishuSkillList(skills: SkillSummary[]): string {
+  if (skills.length === 0) {
+    return "暂无可执行技能。";
+  }
+  return skills
+    .slice(0, 12)
+    .map((skill, index) => `${index + 1}. ${skill.name} (${skill.id})\n${skill.description || "暂无说明"}`)
+    .join("\n\n");
+}
+
+function formatFeishuRunStatus(runs: RunSummary[]): string {
+  if (runs.length === 0) {
+    return "暂无运行历史。";
+  }
+  return runs
+    .slice(0, 6)
+    .map((run) => `${run.skillName}: ${feishuStatusLabel(run.status)} · ${formatFeishuTime(new Date(run.startedAt))}`)
+    .join("\n");
+}
+
+function extractJsonObject(value: string): Record<string, unknown> | null {
+  const fenced = value.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const candidate = fenced?.[1] ?? value.match(/\{[\s\S]*\}/)?.[0];
+  if (!candidate) {
+    return null;
+  }
+  try {
+    return JSON.parse(candidate) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeFeishuIntent(value: Record<string, unknown> | null): FeishuIntent | null {
+  if (!value) {
+    return null;
+  }
+  const rawAction = typeof value.action === "string" ? value.action : "";
+  const actions: FeishuIntent["action"][] = ["run_skill", "list_skills", "status", "help", "chat"];
+  if (!actions.includes(rawAction as FeishuIntent["action"])) {
+    return null;
+  }
+  return {
+    action: rawAction as FeishuIntent["action"],
+    skillId: typeof value.skillId === "string" ? value.skillId : undefined,
+    input: typeof value.input === "string" ? value.input : undefined,
+    reply: typeof value.reply === "string" ? value.reply : undefined,
+    confidence: typeof value.confidence === "number" ? value.confidence : undefined
+  };
+}
+
+function fallbackFeishuIntent(content: string, skills: SkillSummary[]): FeishuIntent {
+  if (/帮助|help|怎么用|指令/i.test(content)) {
+    return { action: "help", confidence: 0.8 };
+  }
+  if (/列表|技能|skill list|有哪些/i.test(content) && !findSkillByText(skills, content)) {
+    return { action: "list_skills", confidence: 0.75 };
+  }
+  if (/状态|进度|历史|status|运行/i.test(content) && !findSkillByText(skills, content)) {
+    return { action: "status", confidence: 0.7 };
+  }
+  const skill = findSkillByText(skills, content);
+  if (skill) {
+    return { action: "run_skill", skillId: skill.id, input: content, confidence: 0.68 };
+  }
+  return {
+    action: "chat",
+    reply: "我已收到。你可以告诉我想运行哪个技能和目标，也可以发送 /skill list 查看技能列表。",
+    confidence: 0.5
+  };
+}
+
+async function readFeishuConversation(config: SkillSpaceConfig): Promise<LlmConversationMessage[]> {
+  const messages = await readJsonFile<LlmConversationMessage[]>(feishuConversationPath(config));
+  return (messages ?? []).filter((item) => item.role === "user" || item.role === "assistant").slice(-20);
+}
+
+async function appendFeishuConversation(config: SkillSpaceConfig, role: LlmConversationMessage["role"], content: string): Promise<void> {
+  const trimmed = content.trim();
+  if (!trimmed) {
+    return;
+  }
+  const messages = await readFeishuConversation(config);
+  messages.push({ role, content: trimmed.slice(0, 2_000), at: new Date().toISOString() });
+  await writeJsonFile(feishuConversationPath(config), messages.slice(-20));
+}
+
+function formatConversationHistory(messages: LlmConversationMessage[]): string {
+  if (messages.length === 0) {
+    return "暂无。";
+  }
+  return messages
+    .slice(-10)
+    .map((message) => `${message.role === "user" ? "用户" : "管家"}：${message.content}`)
+    .join("\n");
+}
+
+async function classifyFeishuIntent(
+  config: SkillSpaceConfig,
+  content: string,
+  skills: SkillSummary[],
+  runs: RunSummary[],
+  conversation: LlmConversationMessage[]
+): Promise<FeishuIntent> {
+  const fallback = fallbackFeishuIntent(content, skills);
+  const llmConfig = (await readLlmConfig(config)) ?? defaultLlmConfig();
+  if (!llmConfig.enabled) {
+    return fallback;
+  }
+
+  try {
+    const result = await callConfiguredLlm(
+      config,
+      [
+        "你是 Skill-Space 的飞书入口调度器。请理解用户从手机飞书发来的自然语言，决定应该查看技能、查看状态、启动技能，还是普通回复。",
+        "只输出 JSON，不要输出 Markdown 或解释。",
+        'JSON schema: {"action":"run_skill|list_skills|status|help|chat","skillId":"可选，必须来自 skills.id","input":"传给技能的用户原始目标或参数","reply":"普通回复内容","confidence":0.0}',
+        "",
+        "可用技能：",
+        JSON.stringify(
+          skills.slice(0, 80).map((skill) => ({
+            id: skill.id,
+            name: skill.name,
+            description: skill.description,
+            tags: skill.tags
+          })),
+          null,
+          2
+        ),
+        "",
+        "最近运行：",
+        JSON.stringify(
+          runs.slice(0, 8).map((run) => ({
+            id: run.runId,
+            skillName: run.skillName,
+            status: run.status
+          })),
+          null,
+          2
+        ),
+        "",
+        "最近飞书对话：",
+        formatConversationHistory(conversation),
+        "",
+        `用户消息：${content}`
+      ].join("\n")
+    );
+    return normalizeFeishuIntent(extractJsonObject(result)) ?? fallback;
+  } catch (error) {
+    feishuLastError = error instanceof Error ? error.message : String(error);
+    return fallback;
+  }
+}
+
+async function dispatchFeishuIntent(
+  config: SkillSpaceConfig,
+  content: string,
+  intent: FeishuIntent,
+  sendReply: (text: string) => Promise<void>
+): Promise<void> {
+  const skills = await scanSkills(config);
+  const runs = await listRuns(config);
+
+  if (intent.action === "help") {
+    await sendReply("可直接发送自然语言任务，例如：用公众号技能写一篇今日 AI 热点文章。也可使用 /skill list、/skill status、/skill run <技能ID> <输入>。任务等待确认时，直接回复 1、确认或补充内容即可。");
     return;
   }
 
+  if (intent.action === "list_skills") {
+    await sendReply(formatFeishuSkillList(skills));
+    return;
+  }
+
+  if (intent.action === "status") {
+    await sendReply(formatFeishuRunStatus(runs));
+    return;
+  }
+
+  if (intent.action === "run_skill") {
+    const skill = findSkillByText(skills, content, intent.skillId);
+    if (!skill) {
+      await sendReply("我理解你想启动技能，但没有匹配到具体技能。请发送 /skill list 查看可用技能，或直接说出技能名称。");
+      return;
+    }
+    const response = await runSkill(config, {
+      skillId: skill.id,
+      runtime: skill.defaultRuntime,
+      input: intent.input?.trim() || content
+    });
+    await sendReply(`已启动：${skill.name}\n运行 ID：${response.runId}`);
+    return;
+  }
+
+  await sendReply(intent.reply || "我已收到。你可以告诉我想执行的技能和目标，我会帮你调度。");
+}
+
+async function handleFeishuMessage(config: SkillSpaceConfig, rawMessage: unknown): Promise<void> {
+  const content = extractFeishuMessageText(rawMessage);
+
   const stored = await readFeishuConfig(config);
-  const target = message.chatId || message.senderId || stored?.receiveId;
+  const target = extractFeishuMessageTarget(rawMessage, stored);
   if (!target) {
     return;
   }
@@ -665,26 +1115,58 @@ async function handleFeishuMessage(config: SkillSpaceConfig, rawMessage: unknown
   const sendReply = async (text: string): Promise<void> => {
     if (feishuChannel?.send) {
       await feishuChannel.send(target, { text });
+      await appendFeishuConversation(config, "assistant", text);
       return;
     }
     await sendFeishuText(config, text);
+    await appendFeishuConversation(config, "assistant", text);
   };
+
+  if (!content) {
+    return;
+  }
+  await appendFeishuConversation(config, "user", content);
+
+  if (!content.startsWith("/skill")) {
+    const waitingRun = await findWaitingRun(config);
+    if (waitingRun) {
+      try {
+        await continueRun(config, {
+          runId: waitingRun.runId,
+          input: content
+        });
+        await sendReply(`已把「${content}」发送到任务：${waitingRun.skillName}`);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        feishuLastError = message;
+        await sendReply(`收到「${content}」，但转发到任务失败：${message}`);
+      }
+      return;
+    }
+
+    const skills = await scanSkills(config);
+    const runs = await listRuns(config);
+    const conversation = await readFeishuConversation(config);
+    const intent = await classifyFeishuIntent(config, content, skills, runs, conversation);
+    await dispatchFeishuIntent(config, content, intent, sendReply);
+    return;
+  }
 
   const [, command = "help", ...rest] = content.split(/\s+/);
   if (command === "help") {
-    await sendReply("可用指令：/skill list、/skill run <技能ID或名称> <输入>、/skill status。");
+    await sendReply("可用指令：/skill list、/skill run <技能ID或名称> <输入>、/skill status。任务等待确认时，直接回复 1、2、3 等即可。");
     return;
   }
 
   if (command === "list") {
     const skills = await scanSkills(config);
-    await sendReply(skills.slice(0, 12).map((skill) => `${skill.id} - ${skill.description}`).join("\n") || "暂无技能。");
+    await sendReply(formatFeishuSkillList(skills));
     return;
   }
 
   if (command === "status") {
     const runs = await listRuns(config);
-    await sendReply(runs.slice(0, 5).map((run) => `${run.skillName}: ${run.status}`).join("\n") || "暂无运行历史。");
+    await sendReply(formatFeishuRunStatus(runs));
     return;
   }
 
@@ -695,7 +1177,7 @@ async function handleFeishuMessage(config: SkillSpaceConfig, rawMessage: unknown
       return;
     }
     const skills = await scanSkills(config);
-    const skill = skills.find((item) => item.id === skillToken || item.name === skillToken);
+    const skill = findSkillByText(skills, skillToken, skillToken);
     if (!skill) {
       await sendReply(`没有找到技能：${skillToken}`);
       return;
@@ -809,6 +1291,11 @@ async function listRuns(config: SkillSpaceConfig): Promise<RunSummary[]> {
 
   return runs
     .filter((run): run is RunSummary => Boolean(run))
+    .map((run) =>
+      run.status === "waiting_input" && run.endedAt && run.lastMessage && !isLikelyWaitingForInput(run.lastMessage)
+        ? { ...run, status: "completed" as const }
+        : run
+    )
     .sort((a, b) => b.startedAt.localeCompare(a.startedAt));
 }
 
@@ -1537,7 +2024,21 @@ function truncateForLog(value: string, limit = 4_000): string {
 }
 
 function isLikelyWaitingForInput(message: string): boolean {
-  return /[\u56de]\u590d|\u9009\u62e9|\u8bf7\u9009\u62e9|\u786e\u8ba4|confirm|choose|select/i.test(message);
+  const text = powershellSingleLine(message).toLowerCase();
+  if (
+    /(?:已完成|完成|执行结果|任务完成|生成完成|保存完成|运行完成|无需回复|不需要回复|process exited|completed|finished|done|success)/i.test(
+      text
+    )
+  ) {
+    return false;
+  }
+
+  return [
+    /(?:请|需要|等待|请你|麻烦|请回复).{0,32}(回复|选择|确认|输入|补充|提供|决定)/i,
+    /(waiting for|please|need).{0,32}(reply|input|confirmation|choice|selection)/i,
+    /(reply|choose|select|confirm|provide|input).{0,32}(one|option|number|choice|below)/i,
+    /(?:^|\n|\s)(?:选项|候选|编号)\s*(?:1|一)[\.\、:：]/i
+  ].some((pattern) => pattern.test(message) || pattern.test(text));
 }
 
 function powershellSingleLine(value: string): string {
@@ -1846,24 +2347,204 @@ async function classifySkillTags(config: SkillSpaceConfig): Promise<ClassifySkil
   return { skills: await scanSkills(config) };
 }
 
+async function getLlmStatus(config: SkillSpaceConfig): Promise<LlmManagerStatus> {
+  return llmStatusFromConfig(await readLlmConfig(config));
+}
+
+async function saveLlmConfig(config: SkillSpaceConfig, request: SaveLlmConfigRequest): Promise<LlmManagerStatus> {
+  const existing = await readLlmConfig(config);
+  const provider = request.provider;
+  const defaults = llmProviderDefaults[provider] ?? llmProviderDefaults["openai-compatible"];
+  const model = request.model.trim() || defaults.model;
+  const baseUrl = request.baseUrl?.trim() || defaults.baseUrl;
+  const apiKey = request.apiKey?.trim()
+    ? encryptSecret(request.apiKey.trim())
+    : existing?.encryptedApiKey;
+
+  await writeLlmConfig(config, {
+    schemaVersion: "skillspace.llm.v1",
+    enabled: request.enabled,
+    provider,
+    model,
+    baseUrl,
+    encryptedApiKey: apiKey,
+    updatedAt: new Date().toISOString()
+  });
+
+  return getLlmStatus(config);
+}
+
+function skillSpaceStewardIdentity(): string {
+  return [
+    "你是 Skill-Space 管家，一个嵌入 Skill-Space 桌面应用的独立 LLM。",
+    "你的职责不是替代 Claude Code、Codex、Hermes 或 OpenClaw 执行任务，而是理解应用状态、解释技能、整理运行结果、规划自动化、协助飞书远程确认，并给出可执行建议。",
+    "你了解 Skill-Space 的核心能力：管理通用 SKILL.md 技能包、扫描和导入本机技能、选择执行智能体运行技能、维护运行历史和产物、支持定时自动化、支持飞书消息通知和远程回复、支持在线更新。",
+    "回答默认使用中文，简洁、具体、可操作。涉及风险、失败或权限时要直接说明原因和下一步。"
+  ].join("\n");
+}
+
+function buildSkillSpaceContext(
+  config: SkillSpaceConfig,
+  skills: SkillSummary[],
+  runs: RunSummary[],
+  schedules: ScheduledTask[],
+  agents: AgentHealth[],
+  feishuStatus: FeishuStatus,
+  skill?: SkillSummary,
+  run?: RunSummary
+): string {
+  return JSON.stringify(
+    {
+      app: {
+        name: "Skill-Space",
+        version: app.getVersion(),
+        dataRoot: config.dataRoot,
+        defaultRuntime: config.defaultRuntime,
+        permissionsMode: config.permissionsMode
+      },
+      selectedSkill: skill
+        ? {
+            id: skill.id,
+            name: skill.name,
+            description: skill.description,
+            tags: skill.tags,
+            runtimes: skill.runtimes
+          }
+        : null,
+      selectedRun: run
+        ? {
+            id: run.runId,
+            skillName: run.skillName,
+            status: run.status,
+            runtime: run.runtime,
+            startedAt: run.startedAt,
+            lastMessage: run.lastMessage,
+            diagnostic: run.diagnostic
+          }
+        : null,
+      inventory: {
+        skillCount: skills.length,
+        recentSkills: skills.slice(0, 12).map((item) => ({
+          id: item.id,
+          name: item.name,
+          description: item.description,
+          tags: item.tags,
+          updatedAt: item.updatedAt
+        })),
+        recentRuns: runs.slice(0, 8).map((item) => ({
+          id: item.runId,
+          skillName: item.skillName,
+          status: item.status,
+          runtime: item.runtime,
+          startedAt: item.startedAt
+        })),
+        schedules: schedules.slice(0, 8).map((item) => ({
+          name: item.name,
+          skillName: item.skillName,
+          enabled: item.enabled,
+          cadence: item.cadence,
+          nextRunAt: item.nextRunAt
+        })),
+        agents: agents.map((item) => ({
+          id: item.id,
+          label: item.label,
+          enabled: item.enabled,
+          status: item.status,
+          detail: item.detail
+        })),
+        feishu: {
+          enabled: feishuStatus.enabled,
+          state: feishuStatus.state,
+          connected: feishuStatus.connected,
+          lastEventAt: feishuStatus.lastEventAt,
+          lastError: feishuStatus.lastError
+        }
+      }
+    },
+    null,
+    2
+  );
+}
+
+async function callConfiguredLlm(config: SkillSpaceConfig, prompt: string): Promise<string> {
+  const stored = (await readLlmConfig(config)) ?? defaultLlmConfig();
+  if (!stored.enabled) {
+    throw new Error("Skill-Space 管家已关闭。");
+  }
+
+  if (stored.provider === "claude-code") {
+    return runClaudeText(config, prompt, config.dataRoot);
+  }
+
+  if (stored.provider === "ollama") {
+    const response = await fetch(`${stored.baseUrl ?? "http://127.0.0.1:11434"}/api/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: stored.model,
+        stream: false,
+        messages: [
+          { role: "system", content: skillSpaceStewardIdentity() },
+          { role: "user", content: prompt }
+        ]
+      })
+    });
+    if (!response.ok) {
+      throw new Error(`Ollama request failed: ${response.status}`);
+    }
+    const data = (await response.json()) as { message?: { content?: string } };
+    return data.message?.content?.trim() || "Ollama 没有返回内容。";
+  }
+
+  const apiKey = stored.encryptedApiKey ? decryptSecret(stored.encryptedApiKey) : "";
+  if (!apiKey) {
+    throw new Error("请先在设置中填写 LLM API Key。");
+  }
+  const baseUrl = (stored.baseUrl ?? "https://api.openai.com/v1").replace(/\/+$/, "");
+  const response = await fetch(`${baseUrl}/chat/completions`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`
+    },
+    body: JSON.stringify({
+      model: stored.model,
+      messages: [
+        { role: "system", content: skillSpaceStewardIdentity() },
+        { role: "user", content: prompt }
+      ],
+      temperature: 0.2
+    })
+  });
+  if (!response.ok) {
+    throw new Error(`LLM request failed: ${response.status}`);
+  }
+  const data = (await response.json()) as { choices?: Array<{ message?: { content?: string } }> };
+  return data.choices?.[0]?.message?.content?.trim() || "LLM 没有返回内容。";
+}
+
 async function askLlm(config: SkillSpaceConfig, request: LlmAnalyzeRequest): Promise<LlmAnalyzeResponse> {
   const skills = await scanSkills(config);
   const runs = await listRuns(config);
+  const schedules = await listSchedules(config);
+  const agents = await checkAgents(config);
+  const feishu = await getFeishuStatus(config);
   const skill = request.skillId ? skills.find((item) => item.id === request.skillId) : undefined;
   const run = request.runId ? runs.find((item) => item.runId === request.runId) : undefined;
-  const result = await runClaudeText(
+  const result = await callConfiguredLlm(
     config,
     [
-      "你是 Skill-Space 的本地 LLM 助手。请用中文给出清晰、简洁、可执行的分析。",
-      "你可以解释技能用途、建议定时策略、分析运行历史，或给出下一步操作。",
+      skillSpaceStewardIdentity(),
       "",
-      `技能上下文：${skill ? `${skill.name} - ${skill.description}` : "未指定"}`,
-      `运行上下文：${run ? `${run.skillName} / ${run.status} / ${run.startedAt}` : "未指定"}`,
+      "以下是当前应用上下文，请基于它回答：",
+      buildSkillSpaceContext(config, skills, runs, schedules, agents, feishu, skill, run),
       "",
-      "用户问题：",
+      "最近对话上下文：",
+      formatConversationHistory(request.history ?? []),
+      "",
+      "用户请求：",
       request.prompt
-    ].join("\n"),
-    config.dataRoot
+    ].join("\n")
   );
   return { result };
 }
@@ -2140,9 +2821,10 @@ async function executeRun(
 
   child.on("close", (code) => {
     const endedAt = new Date().toISOString();
-    const waiting = lastMessage ? isLikelyWaitingForInput(lastMessage) : false;
+    const canComplete = (code === 0 || codexTurnCompleted) && !outputSuggestsEmptyPrompt;
+    const waiting = canComplete && lastMessage ? isLikelyWaitingForInput(lastMessage) : false;
     const status =
-      (code === 0 || codexTurnCompleted) && !outputSuggestsEmptyPrompt
+      canComplete
         ? waiting
           ? "waiting_input"
           : "completed"
@@ -2171,7 +2853,8 @@ async function executeRun(
     });
     void notifyFeishuRun(config, waiting ? "需要确认" : status === "completed" ? "运行完成" : "运行失败", [
       `技能：${runSummary.skillName}`,
-      `状态：${status}`,
+      `状态：${feishuStatusLabel(status)}`,
+      `执行智能体：${runSummary.runtime}`,
       `运行 ID：${runSummary.runId}`,
       waiting && lastMessage ? `需要回复：${truncateForLog(lastMessage, 600)}` : "",
       status === "failed" && runSummary.diagnostic ? `诊断：${runSummary.diagnostic}` : ""
@@ -2215,6 +2898,7 @@ async function runSkill(config: SkillSpaceConfig, request: RunSkillRequest): Pro
   await writeRunSummary(runSummary);
   void notifyFeishuRun(config, "运行已启动", [
     `技能：${skill.name}`,
+    `状态：运行中`,
     `执行智能体：${request.runtime}`,
     `运行 ID：${runId}`
   ]);
@@ -2357,6 +3041,101 @@ function startScheduler(): void {
   void ensureConfig().then((config) => runDueSchedules(config));
 }
 
+function setUpdateStatus(next: Partial<UpdateStatus>): UpdateStatus {
+  updateStatus = {
+    ...updateStatus,
+    currentVersion: app.getVersion(),
+    ...next
+  };
+  return updateStatus;
+}
+
+function configureAutoUpdater(): void {
+  autoUpdater.autoDownload = false;
+  autoUpdater.autoInstallOnAppQuit = false;
+
+  autoUpdater.on("checking-for-update", () => {
+    setUpdateStatus({
+      state: "checking",
+      detail: "正在检查更新...",
+      lastCheckedAt: new Date().toISOString(),
+      error: undefined
+    });
+  });
+  autoUpdater.on("update-available", (info) => {
+    setUpdateStatus({
+      state: "available",
+      detail: `发现新版本 ${info.version}。`,
+      availableVersion: info.version,
+      downloaded: false
+    });
+  });
+  autoUpdater.on("update-not-available", () => {
+    setUpdateStatus({
+      state: "not_available",
+      detail: "当前已经是最新版本。",
+      availableVersion: undefined,
+      downloaded: false
+    });
+  });
+  autoUpdater.on("download-progress", (progress) => {
+    setUpdateStatus({
+      state: "downloading",
+      detail: `正在下载更新：${Math.round(progress.percent)}%`
+    });
+  });
+  autoUpdater.on("update-downloaded", (info) => {
+    setUpdateStatus({
+      state: "downloaded",
+      detail: `版本 ${info.version} 已下载，重启后安装。`,
+      availableVersion: info.version,
+      downloaded: true
+    });
+  });
+  autoUpdater.on("error", (error) => {
+    setUpdateStatus({
+      state: "error",
+      detail: "更新检查失败。",
+      error: error.message
+    });
+  });
+}
+
+async function getUpdateStatus(): Promise<UpdateStatus> {
+  return updateStatus;
+}
+
+async function checkForUpdates(): Promise<UpdateStatus> {
+  if (!app.isPackaged) {
+    return setUpdateStatus({
+      state: "not_available",
+      detail: "开发模式不会连接更新源，打包安装版可检查在线更新。",
+      lastCheckedAt: new Date().toISOString()
+    });
+  }
+  setUpdateStatus({
+    state: "checking",
+    detail: "正在检查更新...",
+    lastCheckedAt: new Date().toISOString(),
+    error: undefined
+  });
+  await autoUpdater.checkForUpdates();
+  return updateStatus;
+}
+
+async function downloadUpdate(): Promise<UpdateStatus> {
+  if (!app.isPackaged) {
+    return checkForUpdates();
+  }
+  setUpdateStatus({ state: "downloading", detail: "正在下载更新..." });
+  await autoUpdater.downloadUpdate();
+  return updateStatus;
+}
+
+async function installUpdate(): Promise<void> {
+  autoUpdater.quitAndInstall(false, true);
+}
+
 async function bootstrap(): Promise<BootstrapPayload> {
   const config = await ensureConfig();
   void ensureFeishuChannel(config);
@@ -2399,6 +3178,7 @@ function createWindow(): void {
 
 app.whenReady().then(() => {
   app.setAppUserModelId("com.skillspace.desktop");
+  configureAutoUpdater();
 
   if (process.argv.includes("--background-scheduler")) {
     void ensureConfig()
@@ -2483,9 +3263,17 @@ app.whenReady().then(() => {
   ipcMain.handle("skillspace:feishu-test", async (_, message?: string) =>
     sendFeishuTest(await ensureConfig(), message)
   );
+  ipcMain.handle("skillspace:llm-status", async () => getLlmStatus(await ensureConfig()));
+  ipcMain.handle("skillspace:llm-save", async (_, request: SaveLlmConfigRequest) =>
+    saveLlmConfig(await ensureConfig(), request)
+  );
   ipcMain.handle("skillspace:ask-llm", async (_, request: LlmAnalyzeRequest) =>
     askLlm(await ensureConfig(), request)
   );
+  ipcMain.handle("skillspace:update-status", () => getUpdateStatus());
+  ipcMain.handle("skillspace:update-check", () => checkForUpdates());
+  ipcMain.handle("skillspace:update-download", () => downloadUpdate());
+  ipcMain.handle("skillspace:update-install", () => installUpdate());
   ipcMain.handle("window:minimize", (event) => {
     const window = BrowserWindow.fromWebContents(event.sender) ?? mainWindow;
     window?.setSkipTaskbar(false);

@@ -10,6 +10,7 @@ import {
   Clock3,
   Command,
   Database,
+  DownloadCloud,
   Eye,
   EyeOff,
   FileText,
@@ -53,6 +54,8 @@ import type {
   FeishuReceiveIdType,
   FeishuStatus,
   Locale,
+  LlmManagerStatus,
+  LlmProvider,
   RunArtifact,
   RunEvent,
   RunSummary,
@@ -60,12 +63,18 @@ import type {
   ScheduledTask,
   SkillChange,
   SkillDetail,
-  SkillSummary
+  SkillSummary,
+  UpdateStatus
 } from "../../shared/types";
 import { createTranslator } from "./i18n";
 
-type ViewId = "dashboard" | "skills" | "runs" | "automations" | "agents" | "settings";
+type ViewId = "dashboard" | "skills" | "runs" | "automations" | "agents" | "feishu" | "settings";
 type ThemeMode = "light" | "dark";
+type StewardChatMessage = {
+  role: "user" | "assistant";
+  content: string;
+  at: string;
+};
 
 const navItems: Array<{ id: ViewId; labelKey: string; icon: typeof LayoutDashboard }> = [
   { id: "dashboard", labelKey: "nav.dashboard", icon: LayoutDashboard },
@@ -73,7 +82,26 @@ const navItems: Array<{ id: ViewId; labelKey: string; icon: typeof LayoutDashboa
   { id: "runs", labelKey: "nav.runs", icon: TerminalSquare },
   { id: "automations", labelKey: "nav.automations", icon: AlarmClock },
   { id: "agents", labelKey: "nav.agents", icon: Bot },
+  { id: "feishu", labelKey: "nav.feishu", icon: MessageCircle },
   { id: "settings", labelKey: "nav.settings", icon: Settings }
+];
+
+const llmProviderOptions: Array<{ id: LlmProvider; labelKey: string; model: string; baseUrl?: string }> = [
+  { id: "claude-code", labelKey: "llm.provider.claude", model: "skill-space-steward" },
+  { id: "openai", labelKey: "llm.provider.openai", model: "gpt-4o-mini", baseUrl: "https://api.openai.com/v1" },
+  { id: "deepseek", labelKey: "llm.provider.deepseek", model: "deepseek-chat", baseUrl: "https://api.deepseek.com/v1" },
+  { id: "qwen", labelKey: "llm.provider.qwen", model: "qwen-plus", baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1" },
+  { id: "kimi", labelKey: "llm.provider.kimi", model: "moonshot-v1-8k", baseUrl: "https://api.moonshot.cn/v1" },
+  { id: "gemini", labelKey: "llm.provider.gemini", model: "gemini-2.5-flash", baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai" },
+  { id: "zhipu", labelKey: "llm.provider.zhipu", model: "glm-4-flash", baseUrl: "https://open.bigmodel.cn/api/paas/v4" },
+  { id: "volcengine", labelKey: "llm.provider.volcengine", model: "doubao-seed-1-6", baseUrl: "https://ark.cn-beijing.volces.com/api/v3" },
+  { id: "siliconflow", labelKey: "llm.provider.siliconflow", model: "Qwen/Qwen2.5-7B-Instruct", baseUrl: "https://api.siliconflow.cn/v1" },
+  { id: "openrouter", labelKey: "llm.provider.openrouter", model: "openai/gpt-4o-mini", baseUrl: "https://openrouter.ai/api/v1" },
+  { id: "groq", labelKey: "llm.provider.groq", model: "llama-3.3-70b-versatile", baseUrl: "https://api.groq.com/openai/v1" },
+  { id: "ollama", labelKey: "llm.provider.ollama", model: "llama3.1", baseUrl: "http://127.0.0.1:11434" },
+  { id: "lmstudio", labelKey: "llm.provider.lmstudio", model: "local-model", baseUrl: "http://127.0.0.1:1234/v1" },
+  { id: "vllm", labelKey: "llm.provider.vllm", model: "local-model", baseUrl: "http://127.0.0.1:8000/v1" },
+  { id: "openai-compatible", labelKey: "llm.provider.compatible", model: "gpt-4o-mini", baseUrl: "https://api.openai.com/v1" }
 ];
 
 const statusIcon = {
@@ -82,6 +110,23 @@ const statusIcon = {
   disabled: CircleOff,
   checking: Loader2
 };
+
+function readStoredStewardMessages(): StewardChatMessage[] {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem("skillspace.stewardMessages") ?? "[]") as StewardChatMessage[];
+    return parsed
+      .filter((message) => message.role === "user" || message.role === "assistant")
+      .map((message) => ({
+        role: message.role,
+        content: String(message.content ?? ""),
+        at: message.at || new Date().toISOString()
+      }))
+      .filter((message) => message.content.trim())
+      .slice(-16);
+  } catch {
+    return [];
+  }
+}
 
 function formatDate(value: string, locale: Locale): string {
   return new Intl.DateTimeFormat(locale, {
@@ -110,6 +155,8 @@ export function App(): ReactElement {
   const [skillChanges, setSkillChanges] = useState<SkillChange[]>([]);
   const [backgroundScheduler, setBackgroundScheduler] = useState<BackgroundSchedulerStatus | null>(null);
   const [feishuStatus, setFeishuStatus] = useState<FeishuStatus | null>(null);
+  const [llmStatus, setLlmStatus] = useState<LlmManagerStatus | null>(null);
+  const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
   const [schedules, setSchedules] = useState<ScheduledTask[]>([]);
   const [scheduleName, setScheduleName] = useState("");
   const [scheduleInput, setScheduleInput] = useState("");
@@ -124,7 +171,11 @@ export function App(): ReactElement {
   const [isClassifyingTags, setIsClassifyingTags] = useState(false);
   const [llmPrompt, setLlmPrompt] = useState("");
   const [llmResult, setLlmResult] = useState("");
+  const [stewardMessages, setStewardMessages] = useState<StewardChatMessage[]>(readStoredStewardMessages);
   const [isLlmBusy, setIsLlmBusy] = useState(false);
+  const [isTestingLlm, setIsTestingLlm] = useState(false);
+  const [llmConfigMessage, setLlmConfigMessage] = useState("");
+  const [updateMessage, setUpdateMessage] = useState("");
   const [useParameterForm, setUseParameterForm] = useState(() => window.localStorage.getItem("skillspace.parameterForm") === "true");
   const [favoriteSkillIds, setFavoriteSkillIds] = useState<string[]>(() => {
     try {
@@ -203,9 +254,11 @@ export function App(): ReactElement {
   async function load(): Promise<void> {
     setIsRefreshing(true);
     const next = await window.skillSpace.bootstrap();
-    const [changes, schedulerStatus] = await Promise.all([
+    const [changes, schedulerStatus, nextLlmStatus, nextUpdateStatus] = await Promise.all([
       window.skillSpace.listSkillChanges(),
-      window.skillSpace.getBackgroundSchedulerStatus()
+      window.skillSpace.getBackgroundSchedulerStatus(),
+      window.skillSpace.getLlmStatus(),
+      window.skillSpace.getUpdateStatus()
     ]);
     const nextFeishuStatus = await window.skillSpace.getFeishuStatus();
     const storedLocale = window.localStorage.getItem("skillspace.locale") as Locale | null;
@@ -215,6 +268,8 @@ export function App(): ReactElement {
     setSkillChanges(changes);
     setBackgroundScheduler(schedulerStatus);
     setFeishuStatus(nextFeishuStatus);
+    setLlmStatus(nextLlmStatus);
+    setUpdateStatus(nextUpdateStatus);
     setSelectedRunId((current) => current ?? next.runs[0]?.runId ?? null);
     setLocale(
       storedLocale && next.config.locale.supported.includes(storedLocale)
@@ -239,9 +294,11 @@ export function App(): ReactElement {
       window.skillSpace.listRuns(),
       window.skillSpace.listSchedules()
     ]);
-    const [changes, schedulerStatus] = await Promise.all([
+    const [changes, schedulerStatus, nextLlmStatus, nextUpdateStatus] = await Promise.all([
       window.skillSpace.listSkillChanges(),
-      window.skillSpace.getBackgroundSchedulerStatus()
+      window.skillSpace.getBackgroundSchedulerStatus(),
+      window.skillSpace.getLlmStatus(),
+      window.skillSpace.getUpdateStatus()
     ]);
     const nextFeishuStatus = await window.skillSpace.getFeishuStatus();
     setPayload((current) => (current ? { ...current, agents, skills, runs, schedules: nextSchedules } : current));
@@ -250,6 +307,8 @@ export function App(): ReactElement {
     setSkillChanges(changes);
     setBackgroundScheduler(schedulerStatus);
     setFeishuStatus(nextFeishuStatus);
+    setLlmStatus(nextLlmStatus);
+    setUpdateStatus(nextUpdateStatus);
     setSelectedRunId((current) => current ?? runs[0]?.runId ?? null);
     setSelectedSkillId((current) => current ?? skills[0]?.id ?? null);
     if (selectedSkillId) {
@@ -457,19 +516,50 @@ export function App(): ReactElement {
   }
 
   async function askLlm(): Promise<void> {
-    if (!llmPrompt.trim()) {
+    const prompt = llmPrompt.trim();
+    if (!prompt) {
       return;
     }
 
     setIsLlmBusy(true);
     setLlmResult("");
+    const userMessage: StewardChatMessage = { role: "user", content: prompt, at: new Date().toISOString() };
+    const nextMessages = [...stewardMessages, userMessage].slice(-16);
+    setStewardMessages(nextMessages);
+    window.localStorage.setItem("skillspace.stewardMessages", JSON.stringify(nextMessages));
+    setLlmPrompt("");
     try {
       const response = await window.skillSpace.askLlm({
-        prompt: llmPrompt,
+        prompt,
         skillId: selectedSkill?.id,
-        runId: selectedRun?.runId
+        runId: selectedRun?.runId,
+        history: stewardMessages.slice(-10).map((message) => ({
+          role: message.role,
+          content: message.content
+        }))
       });
       setLlmResult(response.result);
+      const assistantMessage: StewardChatMessage = {
+        role: "assistant",
+        content: response.result,
+        at: new Date().toISOString()
+      };
+      setStewardMessages((current) => {
+        const stored = [...current, assistantMessage].slice(-16);
+        window.localStorage.setItem("skillspace.stewardMessages", JSON.stringify(stored));
+        return stored;
+      });
+    } catch (error) {
+      const assistantMessage: StewardChatMessage = {
+        role: "assistant",
+        content: error instanceof Error ? error.message : String(error),
+        at: new Date().toISOString()
+      };
+      setStewardMessages((current) => {
+        const stored = [...current, assistantMessage].slice(-16);
+        window.localStorage.setItem("skillspace.stewardMessages", JSON.stringify(stored));
+        return stored;
+      });
     } finally {
       setIsLlmBusy(false);
     }
@@ -557,6 +647,75 @@ export function App(): ReactElement {
 
   async function sendFeishuTest(): Promise<void> {
     setFeishuStatus(await window.skillSpace.sendFeishuTest());
+  }
+
+  async function saveLlmConfig(request: {
+    enabled: boolean;
+    provider: LlmProvider;
+    model: string;
+    baseUrl?: string;
+    apiKey?: string;
+  }): Promise<void> {
+    setLlmConfigMessage("");
+    try {
+      const nextStatus = await window.skillSpace.saveLlmConfig(request);
+      setLlmStatus(nextStatus);
+      setLlmConfigMessage(nextStatus.configured ? t("llm.saved") : nextStatus.detail);
+    } catch (error) {
+      setLlmConfigMessage(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function testLlmConnection(): Promise<void> {
+    setIsTestingLlm(true);
+    setLlmConfigMessage(t("llm.testing"));
+    try {
+      const response = await window.skillSpace.askLlm({
+        prompt: "请只用一句中文回复：Skill-Space 管家连接测试成功。"
+      });
+      setLlmConfigMessage(response.result || t("llm.testPassed"));
+    } catch (error) {
+      setLlmConfigMessage(`${t("llm.testFailed")}：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setIsTestingLlm(false);
+    }
+  }
+
+  async function checkUpdate(): Promise<void> {
+    const checking: UpdateStatus = {
+      currentVersion: updateStatus?.currentVersion ?? "0.0.0",
+      state: "checking",
+      detail: t("update.checking"),
+      lastCheckedAt: new Date().toISOString()
+    };
+    setUpdateStatus(checking);
+    setUpdateMessage(checking.detail);
+    try {
+      const status = await window.skillSpace.checkForUpdates();
+      setUpdateStatus(status);
+      setUpdateMessage(status.detail);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      setUpdateStatus((current) => ({
+        currentVersion: current?.currentVersion ?? "0.0.0",
+        state: "error",
+        detail,
+        error: detail,
+        lastCheckedAt: new Date().toISOString()
+      }));
+      setUpdateMessage(detail);
+    }
+  }
+
+  async function downloadUpdate(): Promise<void> {
+    setUpdateMessage(t("update.downloading"));
+    const status = await window.skillSpace.downloadUpdate();
+    setUpdateStatus(status);
+    setUpdateMessage(status.detail);
+  }
+
+  async function installUpdate(): Promise<void> {
+    await window.skillSpace.installUpdate();
   }
 
   async function openSelectedRunFolder(): Promise<void> {
@@ -749,6 +908,21 @@ export function App(): ReactElement {
               <RefreshCw size={17} className={isRefreshing ? "spin" : ""} />
             </button>
             <button
+              className={`icon-button update-top-status ${updateStatus?.state ?? "idle"}`}
+              onClick={() =>
+                updateStatus?.state === "downloaded"
+                  ? void installUpdate()
+                  : updateStatus?.state === "available"
+                    ? void downloadUpdate()
+                    : void checkUpdate()
+              }
+              type="button"
+              title={updateStatus?.detail ?? t("update.check")}
+            >
+              <DownloadCloud size={17} className={updateStatus?.state === "checking" || updateStatus?.state === "downloading" ? "spin" : ""} />
+            </button>
+            {updateMessage && <span className={`top-status-copy ${updateStatus?.state ?? "idle"}`}>{updateMessage}</span>}
+            <button
               className="icon-button"
               onClick={toggleTheme}
               type="button"
@@ -758,9 +932,9 @@ export function App(): ReactElement {
             </button>
             <button
               className={`icon-button feishu-top-status ${feishuStatus?.state ?? "not_configured"}`}
-              onClick={() => setActiveView("settings")}
+              onClick={() => setActiveView("feishu")}
               type="button"
-              title={`${t("settings.feishu")}: ${t(`feishu.state.${feishuStatus?.state ?? "not_configured"}`)}`}
+              title={`${t("nav.feishu")}: ${t(`feishu.state.${feishuStatus?.state ?? "not_configured"}`)}`}
             >
               <MessageCircle size={17} />
             </button>
@@ -806,7 +980,7 @@ export function App(): ReactElement {
           </div>
         </header>
 
-        <div className="content-grid">
+        <div className={`content-grid ${activeView === "feishu" || activeView === "settings" ? "no-inspector" : ""}`}>
           <section className="main-stage">
             <MetricStrip
               t={t}
@@ -822,6 +996,13 @@ export function App(): ReactElement {
                 agents={payload?.agents ?? []}
                 locale={locale}
                 aliases={skillAliases}
+                llmPrompt={llmPrompt}
+                llmResult={llmResult}
+                stewardMessages={stewardMessages}
+                isLlmBusy={isLlmBusy}
+                llmStatus={llmStatus}
+                onLlmPromptChange={setLlmPrompt}
+                onAskLlm={() => void askLlm()}
                 t={t}
                 onOpenSkills={() => setActiveView("skills")}
                 onOpenRuns={() => setActiveView("runs")}
@@ -859,6 +1040,18 @@ export function App(): ReactElement {
             )}
 
             {activeView === "agents" && <AgentPanel agents={payload?.agents ?? []} t={t} />}
+
+            {activeView === "feishu" && (
+              <FeishuPanel
+                feishuStatus={feishuStatus}
+                locale={locale}
+                onStartFeishuConnect={() => void startFeishuConnect()}
+                onSaveFeishuConfig={(request) => void saveFeishuConfig(request)}
+                onFeishuEnabledChange={(enabled) => void setFeishuEnabled(enabled)}
+                onSendFeishuTest={() => void sendFeishuTest()}
+                t={t}
+              />
+            )}
 
             {activeView === "runs" && (
               <RunConsole
@@ -911,26 +1104,21 @@ export function App(): ReactElement {
                 supported={payload.config.locale.supported}
                 onLocaleChange={changeLocale}
                 payload={payload}
-                llmPrompt={llmPrompt}
-                llmResult={llmResult}
-                isLlmBusy={isLlmBusy}
-                onLlmPromptChange={setLlmPrompt}
-                onAskLlm={() => void askLlm()}
+                llmStatus={llmStatus}
+                onSaveLlmConfig={(request) => void saveLlmConfig(request)}
+                onTestLlm={() => void testLlmConnection()}
+                isTestingLlm={isTestingLlm}
+                llmConfigMessage={llmConfigMessage}
                 useParameterForm={useParameterForm}
                 onUseParameterFormChange={toggleParameterForm}
                 backgroundScheduler={backgroundScheduler}
                 onBackgroundSchedulerChange={(enabled) => void toggleBackgroundScheduler(enabled)}
-                feishuStatus={feishuStatus}
-                onStartFeishuConnect={() => void startFeishuConnect()}
-                onSaveFeishuConfig={(request) => void saveFeishuConfig(request)}
-                onFeishuEnabledChange={(enabled) => void setFeishuEnabled(enabled)}
-                onSendFeishuTest={() => void sendFeishuTest()}
                 t={t}
               />
             )}
           </section>
 
-          <aside className="inspector glass-panel">
+          {activeView !== "feishu" && activeView !== "settings" && <aside className="inspector glass-panel">
             {activeView === "runs" ? (
               <RunSidePanel
                 selectedRun={selectedRun}
@@ -966,7 +1154,7 @@ export function App(): ReactElement {
                 t={t}
               />
             )}
-          </aside>
+          </aside>}
         </div>
       </section>
       {isDiscoveryOpen && (
@@ -988,6 +1176,13 @@ function DashboardPanel({
   agents,
   locale,
   aliases,
+  llmPrompt,
+  llmResult,
+  stewardMessages,
+  isLlmBusy,
+  llmStatus,
+  onLlmPromptChange,
+  onAskLlm,
   t,
   onOpenSkills,
   onOpenRuns,
@@ -997,6 +1192,13 @@ function DashboardPanel({
   agents: AgentHealth[];
   locale: Locale;
   aliases: Record<string, string>;
+  llmPrompt: string;
+  llmResult: string;
+  stewardMessages: StewardChatMessage[];
+  isLlmBusy: boolean;
+  llmStatus: LlmManagerStatus | null;
+  onLlmPromptChange: (value: string) => void;
+  onAskLlm: () => void;
   t: (key: string) => string;
   onOpenSkills: () => void;
   onOpenRuns: () => void;
@@ -1024,24 +1226,43 @@ function DashboardPanel({
         </div>
       </article>
 
-      <article className="dashboard-section glass-panel">
+      <article className="dashboard-section steward-chat glass-panel">
         <div className="section-title">
           <div>
-            <Bot size={18} />
-            <strong>{t("dashboard.runtimeHealth")}</strong>
+            <Wand2 size={18} />
+            <strong>{t("dashboard.stewardChat")}</strong>
           </div>
+          <span className={`steward-state ${llmStatus?.configured ? "ready" : "muted"}`}>
+            {llmStatus?.configured ? t("llm.ready") : t("llm.notReady")}
+          </span>
         </div>
-        <div className="runtime-grid">
-          {agents.map((agent) => {
-            const Icon = statusIcon[agent.status];
-            return (
-              <div className="runtime-pill" key={agent.id}>
-                <Icon size={16} className={agent.status === "checking" ? "spin" : ""} />
-                <span>{agent.label}</span>
-                <b>{t(`status.${agent.status}`)}</b>
+        <div className="steward-chat-body">
+          <div className="steward-message-list">
+            {stewardMessages.length === 0 ? (
+              <div className="steward-message assistant">
+                <strong>{llmStatus?.identity ?? "Skill-Space 管家"}</strong>
+                <p>{llmResult || llmStatus?.detail || t("dashboard.stewardHint")}</p>
               </div>
-            );
-          })}
+            ) : (
+              stewardMessages.map((message, index) => (
+                <div className={`steward-message ${message.role}`} key={`${message.at}-${index}`}>
+                  <strong>{message.role === "user" ? t("dashboard.you") : llmStatus?.identity ?? "Skill-Space 管家"}</strong>
+                  <p>{message.content}</p>
+                </div>
+              ))
+            )}
+          </div>
+          <div className="steward-input-row">
+            <textarea
+              value={llmPrompt}
+              onChange={(event) => onLlmPromptChange(event.target.value)}
+              placeholder={t("dashboard.stewardPlaceholder")}
+            />
+            <button className="primary-button" onClick={onAskLlm} type="button" disabled={isLlmBusy || !llmPrompt.trim()}>
+              {isLlmBusy ? <Loader2 size={16} className="spin" /> : <Send size={16} />}
+              <span>{t("action.send")}</span>
+            </button>
+          </div>
         </div>
       </article>
 
@@ -1736,41 +1957,17 @@ function AutomationPanel({
   );
 }
 
-function SettingsPanel({
-  payload,
-  locale,
-  supported,
-  onLocaleChange,
-  llmPrompt,
-  llmResult,
-  isLlmBusy,
-  onLlmPromptChange,
-  onAskLlm,
-  useParameterForm,
-  onUseParameterFormChange,
-  backgroundScheduler,
-  onBackgroundSchedulerChange,
+function FeishuPanel({
   feishuStatus,
   onStartFeishuConnect,
   onSaveFeishuConfig,
   onFeishuEnabledChange,
   onSendFeishuTest,
+  locale,
   t
 }: {
-  payload: BootstrapPayload;
-  locale: Locale;
-  supported: Locale[];
-  onLocaleChange: (locale: Locale) => void;
-  llmPrompt: string;
-  llmResult: string;
-  isLlmBusy: boolean;
-  onLlmPromptChange: (value: string) => void;
-  onAskLlm: () => void;
-  useParameterForm: boolean;
-  onUseParameterFormChange: (enabled: boolean) => void;
-  backgroundScheduler: BackgroundSchedulerStatus | null;
-  onBackgroundSchedulerChange: (enabled: boolean) => void;
   feishuStatus: FeishuStatus | null;
+  locale: Locale;
   onStartFeishuConnect: () => void;
   onSaveFeishuConfig: (request: {
     enabled: boolean;
@@ -1797,6 +1994,219 @@ function SettingsPanel({
   }, [feishuStatus?.appId, feishuStatus?.receiveId, feishuStatus?.receiveIdType]);
 
   return (
+    <section className="feishu-page">
+      <article className="feishu-hero glass-panel">
+        <div>
+          <span>{t("feishu.kicker")}</span>
+          <strong>{t("feishu.title")}</strong>
+          <p>{t("feishu.subtitle")}</p>
+        </div>
+        <div className={`connection-badge large ${feishuStatus?.state ?? "not_configured"}`}>
+          <span />
+          <b>{t(`feishu.state.${feishuStatus?.state ?? "not_configured"}`)}</b>
+        </div>
+      </article>
+
+      <div className="feishu-layout">
+        <div className="feishu-primary-grid">
+        <article className="feishu-card feishu-connect-card glass-panel">
+          <div className="section-title">
+            <div>
+              <QrCode size={18} />
+              <strong>{t("feishu.connect")}</strong>
+            </div>
+          </div>
+          <p>{feishuStatus?.detail ?? t("status.checking")}</p>
+          {feishuStatus?.lastError && <pre className="feishu-error">{feishuStatus.lastError}</pre>}
+          <div className="qr-stage">
+            {feishuStatus?.qrDataUrl ? (
+              <>
+                <img src={feishuStatus.qrDataUrl} alt={t("feishu.qrAlt")} />
+                <span>{t("feishu.scanHint")}</span>
+              </>
+            ) : (
+              <div className="qr-placeholder">
+                <QrCode size={42} />
+                <span>{t("feishu.qrPlaceholder")}</span>
+              </div>
+            )}
+          </div>
+          <button className="primary-button wide" onClick={onStartFeishuConnect} type="button">
+            <QrCode size={16} />
+            <span>{t("feishu.connect")}</span>
+          </button>
+        </article>
+
+        <article className="feishu-card glass-panel">
+          <div className="section-title">
+            <div>
+              <MessageCircle size={18} />
+              <strong>{t("feishu.manualConfig")}</strong>
+            </div>
+          </div>
+          <div className="feishu-form">
+            <input value={feishuAppId} onChange={(event) => setFeishuAppId(event.target.value)} placeholder={t("feishu.appId")} />
+            <input
+              value={feishuSecret}
+              onChange={(event) => setFeishuSecret(event.target.value)}
+              placeholder={feishuStatus?.configured ? t("feishu.secretKeep") : t("feishu.appSecret")}
+              type="password"
+            />
+            <select
+              className="glass-select wide"
+              value={feishuReceiveIdType}
+              onChange={(event) => setFeishuReceiveIdType(event.target.value as FeishuReceiveIdType)}
+            >
+              <option value="open_id">{t("feishu.openId")}</option>
+              <option value="chat_id">{t("feishu.chatId")}</option>
+            </select>
+            <input value={feishuReceiveId} onChange={(event) => setFeishuReceiveId(event.target.value)} placeholder={t("feishu.receiveId")} />
+          </div>
+          <div className="feishu-actions">
+            <button
+              className="secondary-button"
+              onClick={() =>
+                onSaveFeishuConfig({
+                  enabled: feishuStatus?.enabled ?? true,
+                  appId: feishuAppId,
+                  appSecret: feishuSecret,
+                  receiveId: feishuReceiveId,
+                  receiveIdType: feishuReceiveIdType
+                })
+              }
+              type="button"
+            >
+              {t("action.save")}
+            </button>
+            <button className="secondary-button" onClick={onSendFeishuTest} type="button" disabled={!feishuStatus?.canSend}>
+              {t("feishu.test")}
+            </button>
+            <label className="switch-row">
+              <input
+                type="checkbox"
+                checked={Boolean(feishuStatus?.enabled)}
+                onChange={(event) => onFeishuEnabledChange(event.target.checked)}
+              />
+              <span>{feishuStatus?.enabled ? t("action.enabled") : t("action.disabled")}</span>
+            </label>
+          </div>
+          <div className="feishu-state-grid">
+            <span>{t("feishu.lastEvent")}</span>
+            <b>{feishuStatus?.lastEventAt ? formatDate(feishuStatus.lastEventAt, locale) : t("view.none")}</b>
+            <span>{t("feishu.receiver")}</span>
+            <b>{feishuStatus?.receiveId || t("view.none")}</b>
+          </div>
+        </article>
+        </div>
+
+        <div className="feishu-secondary-grid">
+        <article className="feishu-card feishu-message-preview glass-panel">
+          <div className="section-title">
+            <div>
+              <ScrollText size={18} />
+              <strong>{t("feishu.messagePreview")}</strong>
+            </div>
+            <time>{feishuStatus?.lastEventAt ? formatDate(feishuStatus.lastEventAt, locale) : t("view.none")}</time>
+          </div>
+          <div className="feishu-message-stack">
+            <div className="feishu-message-card active">
+              <span>{t("feishu.previewStarted")}</span>
+              <strong>Skill-Space | {t("run.started")}</strong>
+              <p>{t("feishu.previewStartedBody")}</p>
+            </div>
+            <div className="feishu-message-card waiting">
+              <span>{t("status.waiting_input")}</span>
+              <strong>{t("feishu.previewWaiting")}</strong>
+              <p>{t("feishu.previewWaitingBody")}</p>
+            </div>
+          </div>
+        </article>
+
+        <article className="feishu-card glass-panel">
+          <div className="section-title">
+            <div>
+              <TerminalSquare size={18} />
+              <strong>{t("feishu.commands")}</strong>
+            </div>
+          </div>
+          <div className="command-list">
+            <code>/skill list</code>
+            <span>{t("feishu.commandList")}</span>
+            <code>/skill status</code>
+            <span>{t("feishu.commandStatus")}</span>
+            <code>/skill run skill-id 输入内容</code>
+            <span>{t("feishu.commandRun")}</span>
+          </div>
+        </article>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function SettingsPanel({
+  payload,
+  locale,
+  supported,
+  onLocaleChange,
+  llmStatus,
+  onSaveLlmConfig,
+  onTestLlm,
+  isTestingLlm,
+  llmConfigMessage,
+  useParameterForm,
+  onUseParameterFormChange,
+  backgroundScheduler,
+  onBackgroundSchedulerChange,
+  t
+}: {
+  payload: BootstrapPayload;
+  locale: Locale;
+  supported: Locale[];
+  onLocaleChange: (locale: Locale) => void;
+  llmStatus: LlmManagerStatus | null;
+  onSaveLlmConfig: (request: {
+    enabled: boolean;
+    provider: LlmProvider;
+    model: string;
+    baseUrl?: string;
+    apiKey?: string;
+  }) => void;
+  onTestLlm: () => void;
+  isTestingLlm: boolean;
+  llmConfigMessage: string;
+  useParameterForm: boolean;
+  onUseParameterFormChange: (enabled: boolean) => void;
+  backgroundScheduler: BackgroundSchedulerStatus | null;
+  onBackgroundSchedulerChange: (enabled: boolean) => void;
+  t: (key: string) => string;
+}): ReactElement {
+  const [llmEnabled, setLlmEnabled] = useState(Boolean(llmStatus?.enabled ?? true));
+  const [llmProvider, setLlmProvider] = useState<LlmProvider>(llmStatus?.provider ?? "claude-code");
+  const [llmModel, setLlmModel] = useState(llmStatus?.model ?? "skill-space-steward");
+  const [llmBaseUrl, setLlmBaseUrl] = useState(llmStatus?.baseUrl ?? "");
+  const [llmApiKey, setLlmApiKey] = useState("");
+
+  useEffect(() => {
+    setLlmEnabled(Boolean(llmStatus?.enabled ?? true));
+    setLlmProvider(llmStatus?.provider ?? "claude-code");
+    setLlmModel(llmStatus?.model ?? "skill-space-steward");
+    setLlmBaseUrl(llmStatus?.baseUrl ?? "");
+  }, [llmStatus?.baseUrl, llmStatus?.enabled, llmStatus?.model, llmStatus?.provider]);
+
+  function chooseLlmProvider(provider: LlmProvider): void {
+    const next = llmProviderOptions.find((item) => item.id === provider);
+    const previous = llmProviderOptions.find((item) => item.id === llmProvider);
+    setLlmProvider(provider);
+    if (next && (!llmModel.trim() || llmModel === previous?.model)) {
+      setLlmModel(next.model);
+    }
+    if (next && (!llmBaseUrl.trim() || llmBaseUrl === previous?.baseUrl)) {
+      setLlmBaseUrl(next.baseUrl ?? "");
+    }
+  }
+
+  return (
     <section className="settings-grid">
       <article className="settings-card settings-wide glass-panel">
         <div className="section-title">
@@ -1805,13 +2215,52 @@ function SettingsPanel({
             <strong>{t("settings.llm")}</strong>
           </div>
         </div>
-        <p>{t("settings.llmPrompt")}</p>
-        <textarea value={llmPrompt} onChange={(event) => onLlmPromptChange(event.target.value)} placeholder={t("settings.llmPlaceholder")} />
-        <button className="primary-button" onClick={onAskLlm} type="button" disabled={isLlmBusy || !llmPrompt.trim()}>
-          {isLlmBusy ? <Loader2 size={16} className="spin" /> : <Send size={16} />}
-          <span>{t("action.send")}</span>
-        </button>
-        {llmResult && <pre className="llm-result">{llmResult}</pre>}
+        <p>{llmStatus?.detail ?? t("settings.llmPrompt")}</p>
+        <div className="llm-config-grid">
+          <label className="switch-row">
+            <input
+              type="checkbox"
+              checked={llmEnabled}
+              onChange={(event) => setLlmEnabled(event.target.checked)}
+            />
+            <span>{llmEnabled ? t("action.enabled") : t("action.disabled")}</span>
+          </label>
+          <select className="glass-select wide" value={llmProvider} onChange={(event) => chooseLlmProvider(event.target.value as LlmProvider)}>
+            {llmProviderOptions.map((option) => (
+              <option key={option.id} value={option.id}>
+                {t(option.labelKey)}
+              </option>
+            ))}
+          </select>
+          <input value={llmModel} onChange={(event) => setLlmModel(event.target.value)} placeholder={t("llm.model")} />
+          <input value={llmBaseUrl} onChange={(event) => setLlmBaseUrl(event.target.value)} placeholder={t("llm.baseUrl")} />
+          <input
+            value={llmApiKey}
+            onChange={(event) => setLlmApiKey(event.target.value)}
+            placeholder={t("llm.apiKey")}
+            type="password"
+          />
+          <button
+            className="secondary-button"
+            onClick={() =>
+              onSaveLlmConfig({
+                enabled: llmEnabled,
+                provider: llmProvider,
+                model: llmModel,
+                baseUrl: llmBaseUrl,
+                apiKey: llmApiKey
+              })
+            }
+            type="button"
+          >
+            {t("action.save")}
+          </button>
+          <button className="secondary-button" onClick={onTestLlm} type="button" disabled={isTestingLlm || !llmEnabled}>
+            {isTestingLlm ? <Loader2 size={16} className="spin" /> : <Cable size={16} />}
+            <span>{t("llm.test")}</span>
+          </button>
+        </div>
+        {llmConfigMessage && <div className="inline-status">{llmConfigMessage}</div>}
       </article>
 
       <article className="settings-card glass-panel">
@@ -1866,71 +2315,6 @@ function SettingsPanel({
             onChange={(event) => onBackgroundSchedulerChange(event.target.checked)}
           />
           <span>{backgroundScheduler?.enabled ? t("action.enabled") : t("action.disabled")}</span>
-        </label>
-      </article>
-      <article className="settings-card feishu-card glass-panel">
-        <MessageCircle size={19} />
-        <label>{t("settings.feishu")}</label>
-        <p>{feishuStatus?.detail ?? t("status.checking")}</p>
-        <div className={`connection-badge ${feishuStatus?.state ?? "not_configured"}`}>
-          <span />
-          <b>{t(`feishu.state.${feishuStatus?.state ?? "not_configured"}`)}</b>
-        </div>
-        {feishuStatus?.qrDataUrl && (
-          <div className="qr-box">
-            <img src={feishuStatus.qrDataUrl} alt={t("feishu.qrAlt")} />
-            <span>{t("feishu.scanHint")}</span>
-          </div>
-        )}
-        <div className="feishu-form">
-          <input value={feishuAppId} onChange={(event) => setFeishuAppId(event.target.value)} placeholder={t("feishu.appId")} />
-          <input
-            value={feishuSecret}
-            onChange={(event) => setFeishuSecret(event.target.value)}
-            placeholder={feishuStatus?.configured ? t("feishu.secretKeep") : t("feishu.appSecret")}
-            type="password"
-          />
-          <select
-            className="glass-select wide"
-            value={feishuReceiveIdType}
-            onChange={(event) => setFeishuReceiveIdType(event.target.value as FeishuReceiveIdType)}
-          >
-            <option value="open_id">{t("feishu.openId")}</option>
-            <option value="chat_id">{t("feishu.chatId")}</option>
-          </select>
-          <input value={feishuReceiveId} onChange={(event) => setFeishuReceiveId(event.target.value)} placeholder={t("feishu.receiveId")} />
-        </div>
-        <div className="feishu-actions">
-          <button className="secondary-button" onClick={onStartFeishuConnect} type="button">
-            <QrCode size={16} />
-            <span>{t("feishu.connect")}</span>
-          </button>
-          <button
-            className="secondary-button"
-            onClick={() =>
-              onSaveFeishuConfig({
-                enabled: feishuStatus?.enabled ?? true,
-                appId: feishuAppId,
-                appSecret: feishuSecret,
-                receiveId: feishuReceiveId,
-                receiveIdType: feishuReceiveIdType
-              })
-            }
-            type="button"
-          >
-            {t("action.save")}
-          </button>
-          <button className="secondary-button" onClick={onSendFeishuTest} type="button" disabled={!feishuStatus?.canSend}>
-            {t("feishu.test")}
-          </button>
-        </div>
-        <label className="switch-row">
-          <input
-            type="checkbox"
-            checked={Boolean(feishuStatus?.enabled)}
-            onChange={(event) => onFeishuEnabledChange(event.target.checked)}
-          />
-          <span>{feishuStatus?.enabled ? t("action.enabled") : t("action.disabled")}</span>
         </label>
       </article>
       <article className="settings-card glass-panel">

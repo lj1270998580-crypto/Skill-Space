@@ -211,10 +211,59 @@ export interface LlmAnalyzeRequest {
   prompt: string;
   skillId?: string;
   runId?: string;
+  history?: Array<{
+    role: "user" | "assistant";
+    content: string;
+  }>;
 }
 
 export interface LlmAnalyzeResponse {
   result: string;
+}
+
+export type LlmProvider =
+  | "claude-code"
+  | "openai"
+  | "deepseek"
+  | "qwen"
+  | "kimi"
+  | "gemini"
+  | "zhipu"
+  | "volcengine"
+  | "siliconflow"
+  | "openrouter"
+  | "groq"
+  | "lmstudio"
+  | "vllm"
+  | "ollama"
+  | "openai-compatible";
+
+export interface LlmManagerStatus {
+  enabled: boolean;
+  configured: boolean;
+  provider: LlmProvider;
+  model: string;
+  baseUrl?: string;
+  identity: string;
+  detail: string;
+}
+
+export interface SaveLlmConfigRequest {
+  enabled: boolean;
+  provider: LlmProvider;
+  model: string;
+  baseUrl?: string;
+  apiKey?: string;
+}
+
+export interface UpdateStatus {
+  currentVersion: string;
+  state: "idle" | "checking" | "available" | "not_available" | "downloading" | "downloaded" | "error";
+  detail: string;
+  availableVersion?: string;
+  downloaded?: boolean;
+  lastCheckedAt?: string;
+  error?: string;
 }
 
 export interface BackgroundSchedulerStatus {
@@ -290,7 +339,13 @@ export interface SkillSpaceApi {
   saveFeishuConfig(request: SaveFeishuConfigRequest): Promise<FeishuStatus>;
   setFeishuEnabled(enabled: boolean): Promise<FeishuStatus>;
   sendFeishuTest(message?: string): Promise<FeishuStatus>;
+  getLlmStatus(): Promise<LlmManagerStatus>;
+  saveLlmConfig(request: SaveLlmConfigRequest): Promise<LlmManagerStatus>;
   askLlm(request: LlmAnalyzeRequest): Promise<LlmAnalyzeResponse>;
+  getUpdateStatus(): Promise<UpdateStatus>;
+  checkForUpdates(): Promise<UpdateStatus>;
+  downloadUpdate(): Promise<UpdateStatus>;
+  installUpdate(): Promise<void>;
   minimizeWindow(): Promise<void>;
   toggleMaximizeWindow(): Promise<void>;
   closeWindow(): Promise<void>;
