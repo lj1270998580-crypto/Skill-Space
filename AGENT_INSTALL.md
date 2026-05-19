@@ -47,7 +47,7 @@ powershell -File .\scripts\install-from-github.ps1 -DataRoot D:\Skill-Space
 生成的安装包默认位于：
 
 ```text
-release\Skill-Space-Setup-0.1.0-x64.exe
+release\Skill-Space-Setup-<version>-x64.exe
 ```
 
 ## English
@@ -87,6 +87,5 @@ powershell -File .\scripts\install-from-github.ps1 -DataRoot D:\Skill-Space
 The generated installer is placed under:
 
 ```text
-release\Skill-Space-Setup-0.1.0-x64.exe
+release\Skill-Space-Setup-<version>-x64.exe
 ```
-
