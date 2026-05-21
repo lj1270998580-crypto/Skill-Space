@@ -1,4 +1,4 @@
-# Skill-Space
+﻿# Skill-Space
 
 > 本地优先的 SkillOps 桌面工作台。把 Codex、Claude Code、OpenClaw、Hermes Agent 等 AI Agent 中可复用的工作流沉淀为通用 `SKILL.md` 技能，并统一管理、运行、对话、定时和移动端协同。
 >
@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.1.9-5ed8cf" />
+  <img alt="Version" src="https://img.shields.io/badge/version-0.1.10-5ed8cf" />
   <img alt="Platform" src="https://img.shields.io/badge/platform-Windows%2010%2F11-86e4d8" />
   <img alt="Runtime" src="https://img.shields.io/badge/runtime-Electron%20%2B%20React-cfd9ff" />
   <img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-e8d28d" />
@@ -29,15 +29,16 @@
 
 ### 当前版本
 
-- 最新版本：`0.1.9`
-- GitHub Release：<https://github.com/lj1270998580-crypto/Skill-Space/releases/tag/v0.1.9>
-- Windows 安装包：<https://github.com/lj1270998580-crypto/Skill-Space/releases/download/v0.1.9/Skill-Space-Setup-0.1.9-x64.exe>
+- 最新版本：`0.1.10`
+- GitHub Release：<https://github.com/lj1270998580-crypto/Skill-Space/releases/tag/v0.1.10>
+- Windows 安装包：<https://github.com/lj1270998580-crypto/Skill-Space/releases/download/v0.1.10/Skill-Space-Setup-0.1.10-x64.exe>
 - 在线更新源：<https://ailabing.cn/downloads/skill-space/latest.yml>
 - 默认执行器：Claude Code
 - 默认权限模式：个人本地使用，`full`
 
-### 0.1.9 更新重点
+### 0.1.10 更新重点
 
+- 修复在线更新版本比较逻辑，旧版本不会再被误判为新版本。
 - 优化智能体、技能库和设置页的窗口适配，减少窄宽度下的组件挤压。
 - 设置页支持修改本地存储根目录，并尝试迁移原有技能、运行记录、日志和配置。
 - 智能体配置支持命令、参数、工作目录和环境变量，减少硬编码路径。
@@ -83,7 +84,7 @@ flowchart TD
 #### 普通用户
 
 1. 打开 [GitHub Releases](https://github.com/lj1270998580-crypto/Skill-Space/releases/latest)。
-2. 下载 `Skill-Space-Setup-0.1.9-x64.exe`。
+2. 下载 `Skill-Space-Setup-0.1.10-x64.exe`。
 3. 运行安装包，安装完成后从桌面或开始菜单打开 Skill-Space。
 
 #### Agent 自动安装
@@ -135,8 +136,8 @@ npm run dist:win
 Windows 安装包和在线更新文件由 `electron-builder` 生成：
 
 ```text
-release/Skill-Space-Setup-0.1.9-x64.exe
-release/Skill-Space-Setup-0.1.9-x64.exe.blockmap
+release/Skill-Space-Setup-0.1.10-x64.exe
+release/Skill-Space-Setup-0.1.10-x64.exe.blockmap
 release/latest.yml
 ```
 
@@ -152,15 +153,16 @@ https://ailabing.cn/downloads/skill-space/
 
 ### Current Version
 
-- Latest version: `0.1.9`
-- GitHub Release: <https://github.com/lj1270998580-crypto/Skill-Space/releases/tag/v0.1.9>
-- Windows installer: <https://github.com/lj1270998580-crypto/Skill-Space/releases/download/v0.1.9/Skill-Space-Setup-0.1.9-x64.exe>
+- Latest version: `0.1.10`
+- GitHub Release: <https://github.com/lj1270998580-crypto/Skill-Space/releases/tag/v0.1.10>
+- Windows installer: <https://github.com/lj1270998580-crypto/Skill-Space/releases/download/v0.1.10/Skill-Space-Setup-0.1.10-x64.exe>
 - Auto-update feed: <https://ailabing.cn/downloads/skill-space/latest.yml>
 - Default runner: Claude Code
 - Default permission mode: local personal use, `full`
 
-### What's New In 0.1.9
+### What's New In 0.1.10
 
+- Fixed online update version comparison so older builds are ignored correctly.
 - Improved responsive layouts for agent settings, skill cards, and settings panels.
 - Added configurable local storage root with best-effort data migration.
 - Added editable agent command, args, working directory, and environment variables.
@@ -186,7 +188,7 @@ https://ailabing.cn/downloads/skill-space/
 ### Install
 
 1. Open [GitHub Releases](https://github.com/lj1270998580-crypto/Skill-Space/releases/latest).
-2. Download `Skill-Space-Setup-0.1.9-x64.exe`.
+2. Download `Skill-Space-Setup-0.1.10-x64.exe`.
 3. Run the installer and launch Skill-Space from the desktop or Start Menu.
 
 ### Development

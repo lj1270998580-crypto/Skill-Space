@@ -3839,6 +3839,46 @@ function updateReleaseFields(info: { version?: string; releaseName?: string | nu
   };
 }
 
+function compareVersionPart(left: string, right: string): number {
+  const leftNumber = Number(left.replace(/\D.*$/, ""));
+  const rightNumber = Number(right.replace(/\D.*$/, ""));
+  if (Number.isFinite(leftNumber) && Number.isFinite(rightNumber) && leftNumber !== rightNumber) {
+    return leftNumber > rightNumber ? 1 : -1;
+  }
+  return left.localeCompare(right);
+}
+
+function compareVersions(left: string, right: string): number {
+  const leftParts = left.split(/[.-]/).filter(Boolean);
+  const rightParts = right.split(/[.-]/).filter(Boolean);
+  const length = Math.max(leftParts.length, rightParts.length);
+  for (let index = 0; index < length; index += 1) {
+    const result = compareVersionPart(leftParts[index] ?? "0", rightParts[index] ?? "0");
+    if (result !== 0) {
+      return result;
+    }
+  }
+  return 0;
+}
+
+function isUpdateNewer(version?: string): boolean {
+  return Boolean(version && compareVersions(version, app.getVersion()) > 0);
+}
+
+function markNoNewerUpdate(version?: string): UpdateStatus {
+  return setUpdateStatus({
+    state: "not_available",
+    detail: version
+      ? `当前版本 ${app.getVersion()} 不低于更新源版本 ${version}，已忽略。`
+      : `当前版本 ${app.getVersion()} 已是最新。`,
+    availableVersion: undefined,
+    releaseName: undefined,
+    releaseNotes: undefined,
+    releaseDate: undefined,
+    downloaded: false
+  });
+}
+
 function configureAutoUpdater(): void {
   autoUpdater.autoDownload = false;
   autoUpdater.autoInstallOnAppQuit = false;
@@ -3852,6 +3892,11 @@ function configureAutoUpdater(): void {
     });
   });
   autoUpdater.on("update-available", (info) => {
+    if (!isUpdateNewer(info.version)) {
+      markNoNewerUpdate(info.version);
+      return;
+    }
+
     setUpdateStatus({
       state: "available",
       detail: `发现新版本 ${info.version}。`,
@@ -3877,6 +3922,11 @@ function configureAutoUpdater(): void {
     });
   });
   autoUpdater.on("update-downloaded", (info) => {
+    if (!isUpdateNewer(info.version)) {
+      markNoNewerUpdate(info.version);
+      return;
+    }
+
     setUpdateStatus({
       state: "downloaded",
       detail: `版本 ${info.version} 已下载，重启后安装。`,
@@ -3901,7 +3951,7 @@ async function checkForUpdates(): Promise<UpdateStatus> {
   if (!app.isPackaged) {
     return setUpdateStatus({
       state: "not_available",
-      detail: "开发模式不会连接更新源，打包安装版可检查在线更新。",
+      detail: "开发模式不会连接更新源，打包安装版才会检查在线更新。",
       lastCheckedAt: new Date().toISOString()
     });
   }
@@ -3912,26 +3962,30 @@ async function checkForUpdates(): Promise<UpdateStatus> {
     error: undefined
   });
   const result = await autoUpdater.checkForUpdates();
-  if (result?.updateInfo && result.updateInfo.version !== app.getVersion()) {
+  if (result?.updateInfo && isUpdateNewer(result.updateInfo.version)) {
     setUpdateStatus({
       state: "available",
       detail: `发现新版本 ${result.updateInfo.version}。`,
       ...updateReleaseFields(result.updateInfo),
       downloaded: false
     });
+  } else if (result?.updateInfo) {
+    markNoNewerUpdate(result.updateInfo.version);
   }
   return updateStatus;
 }
-
 async function downloadUpdate(): Promise<UpdateStatus> {
   if (!app.isPackaged) {
     return checkForUpdates();
   }
+  if (updateStatus.availableVersion && !isUpdateNewer(updateStatus.availableVersion)) {
+    return markNoNewerUpdate(updateStatus.availableVersion);
+  }
+
   setUpdateStatus({ state: "downloading", detail: "正在下载更新..." });
   await autoUpdater.downloadUpdate();
   return updateStatus;
 }
-
 async function installUpdate(): Promise<void> {
   autoUpdater.quitAndInstall(false, true);
 }
