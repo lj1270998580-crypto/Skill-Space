@@ -9,6 +9,8 @@ import type {
   CreateScheduleRequest,
   DiscoveredSkill,
   ImportSkillResponse,
+  EditSkillWithLlmRequest,
+  EditSkillWithLlmResponse,
   LlmAnalyzeRequest,
   LlmAnalyzeResponse,
   SaveLlmConfigRequest,
@@ -19,6 +21,8 @@ import type {
   RunSkillResponse,
   RunSummary,
   ScheduledTask,
+  SaveAgentConfigRequest,
+  SaveStorageRootRequest,
   SkillChange,
   SkillDetail,
   SkillSpaceApi,
@@ -28,6 +32,11 @@ import type {
 const api: SkillSpaceApi = {
   bootstrap: () => ipcRenderer.invoke("skillspace:bootstrap") as Promise<BootstrapPayload>,
   refreshAgents: () => ipcRenderer.invoke("skillspace:agents") as Promise<AgentHealth[]>,
+  saveAgentConfig: (request: SaveAgentConfigRequest) =>
+    ipcRenderer.invoke("skillspace:agent-save", request) as Promise<BootstrapPayload>,
+  chooseStorageRoot: () => ipcRenderer.invoke("skillspace:storage-choose") as Promise<string | null>,
+  saveStorageRoot: (request: SaveStorageRootRequest) =>
+    ipcRenderer.invoke("skillspace:storage-save", request) as Promise<BootstrapPayload>,
   scanSkills: () => ipcRenderer.invoke("skillspace:skills") as Promise<SkillSummary[]>,
   discoverSkills: () => ipcRenderer.invoke("skillspace:discover-skills") as Promise<DiscoveredSkill[]>,
   importDiscoveredSkill: (root: string) =>
@@ -46,6 +55,8 @@ const api: SkillSpaceApi = {
     ipcRenderer.invoke("skillspace:delete-skill", skillId) as Promise<{ deleted: boolean }>,
   summarizeSkill: (skillId: string) =>
     ipcRenderer.invoke("skillspace:summarize-skill", skillId) as Promise<{ skill: SkillSummary; summary: string }>,
+  editSkillWithLlm: (request: EditSkillWithLlmRequest) =>
+    ipcRenderer.invoke("skillspace:edit-skill-with-llm", request) as Promise<EditSkillWithLlmResponse>,
   classifySkillTags: () =>
     ipcRenderer.invoke("skillspace:classify-skill-tags") as Promise<ClassifySkillTagsResponse>,
   importSkill: () => ipcRenderer.invoke("skillspace:import") as Promise<ImportSkillResponse>,
@@ -70,6 +81,7 @@ const api: SkillSpaceApi = {
     ipcRenderer.invoke("skillspace:feishu-save", request),
   setFeishuEnabled: (enabled: boolean) => ipcRenderer.invoke("skillspace:feishu-enabled", enabled),
   sendFeishuTest: (message?: string) => ipcRenderer.invoke("skillspace:feishu-test", message),
+  listFeishuDecisionLogs: () => ipcRenderer.invoke("skillspace:feishu-decisions"),
   getLlmStatus: () => ipcRenderer.invoke("skillspace:llm-status"),
   saveLlmConfig: (request: SaveLlmConfigRequest) => ipcRenderer.invoke("skillspace:llm-save", request),
   askLlm: (request: LlmAnalyzeRequest) =>
@@ -78,6 +90,7 @@ const api: SkillSpaceApi = {
   checkForUpdates: () => ipcRenderer.invoke("skillspace:update-check"),
   downloadUpdate: () => ipcRenderer.invoke("skillspace:update-download"),
   installUpdate: () => ipcRenderer.invoke("skillspace:update-install"),
+  setCloseToTray: (enabled: boolean) => ipcRenderer.invoke("skillspace:set-close-to-tray", enabled),
   minimizeWindow: () => ipcRenderer.invoke("window:minimize") as Promise<void>,
   toggleMaximizeWindow: () => ipcRenderer.invoke("window:toggle-maximize") as Promise<void>,
   closeWindow: () => ipcRenderer.invoke("window:close") as Promise<void>,

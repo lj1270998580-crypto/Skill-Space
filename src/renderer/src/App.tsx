@@ -47,10 +47,12 @@ import {
 import { type ReactElement, useEffect, useMemo, useState } from "react";
 import type {
   AgentHealth,
+  AgentConfig,
   AgentId,
   BackgroundSchedulerStatus,
   BootstrapPayload,
   DiscoveredSkill,
+  FeishuDecisionLogEntry,
   FeishuReceiveIdType,
   FeishuStatus,
   Locale,
@@ -155,6 +157,7 @@ export function App(): ReactElement {
   const [skillChanges, setSkillChanges] = useState<SkillChange[]>([]);
   const [backgroundScheduler, setBackgroundScheduler] = useState<BackgroundSchedulerStatus | null>(null);
   const [feishuStatus, setFeishuStatus] = useState<FeishuStatus | null>(null);
+  const [feishuDecisionLogs, setFeishuDecisionLogs] = useState<FeishuDecisionLogEntry[]>([]);
   const [llmStatus, setLlmStatus] = useState<LlmManagerStatus | null>(null);
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
   const [schedules, setSchedules] = useState<ScheduledTask[]>([]);
@@ -196,6 +199,9 @@ export function App(): ReactElement {
     }
   });
   const [isSummarizing, setIsSummarizing] = useState(false);
+  const [isEditingSkill, setIsEditingSkill] = useState(false);
+  const [skillEditPrompt, setSkillEditPrompt] = useState("");
+  const [skillEditFeedback, setSkillEditFeedback] = useState("");
   const [isRefreshing, setIsRefreshing] = useState(true);
   const [isRunning, setIsRunning] = useState(false);
   const [theme, setTheme] = useState<ThemeMode>(() => {
@@ -255,11 +261,12 @@ export function App(): ReactElement {
   async function load(): Promise<void> {
     setIsRefreshing(true);
     const next = await window.skillSpace.bootstrap();
-    const [changes, schedulerStatus, nextLlmStatus, nextUpdateStatus] = await Promise.all([
+    const [changes, schedulerStatus, nextLlmStatus, nextUpdateStatus, nextFeishuDecisionLogs] = await Promise.all([
       window.skillSpace.listSkillChanges(),
       window.skillSpace.getBackgroundSchedulerStatus(),
       window.skillSpace.getLlmStatus(),
-      window.skillSpace.getUpdateStatus()
+      window.skillSpace.getUpdateStatus(),
+      window.skillSpace.listFeishuDecisionLogs()
     ]);
     const nextFeishuStatus = await window.skillSpace.getFeishuStatus();
     const storedLocale = window.localStorage.getItem("skillspace.locale") as Locale | null;
@@ -269,6 +276,7 @@ export function App(): ReactElement {
     setSkillChanges(changes);
     setBackgroundScheduler(schedulerStatus);
     setFeishuStatus(nextFeishuStatus);
+    setFeishuDecisionLogs(nextFeishuDecisionLogs);
     setLlmStatus(nextLlmStatus);
     setUpdateStatus(nextUpdateStatus);
     setSelectedRunId((current) => current ?? next.runs[0]?.runId ?? null);
@@ -295,11 +303,12 @@ export function App(): ReactElement {
       window.skillSpace.listRuns(),
       window.skillSpace.listSchedules()
     ]);
-    const [changes, schedulerStatus, nextLlmStatus, nextUpdateStatus] = await Promise.all([
+    const [changes, schedulerStatus, nextLlmStatus, nextUpdateStatus, nextFeishuDecisionLogs] = await Promise.all([
       window.skillSpace.listSkillChanges(),
       window.skillSpace.getBackgroundSchedulerStatus(),
       window.skillSpace.getLlmStatus(),
-      window.skillSpace.getUpdateStatus()
+      window.skillSpace.getUpdateStatus(),
+      window.skillSpace.listFeishuDecisionLogs()
     ]);
     const nextFeishuStatus = await window.skillSpace.getFeishuStatus();
     setPayload((current) => (current ? { ...current, agents, skills, runs, schedules: nextSchedules } : current));
@@ -308,6 +317,7 @@ export function App(): ReactElement {
     setSkillChanges(changes);
     setBackgroundScheduler(schedulerStatus);
     setFeishuStatus(nextFeishuStatus);
+    setFeishuDecisionLogs(nextFeishuDecisionLogs);
     setLlmStatus(nextLlmStatus);
     setUpdateStatus(nextUpdateStatus);
     setSelectedRunId((current) => current ?? runs[0]?.runId ?? null);
@@ -316,6 +326,22 @@ export function App(): ReactElement {
       await window.skillSpace.getSkillDetail(selectedSkillId).then(setSelectedSkillDetail).catch(() => undefined);
     }
     setIsRefreshing(false);
+  }
+
+  async function saveAgent(agentId: AgentId, config: AgentConfig): Promise<void> {
+    const next = await window.skillSpace.saveAgentConfig({ agentId, config });
+    setPayload(next);
+    setRunHistory(next.runs);
+    setSchedules(next.schedules);
+  }
+
+  async function saveStorageRoot(dataRoot: string): Promise<string> {
+    const next = await window.skillSpace.saveStorageRoot({ dataRoot });
+    setPayload(next);
+    setRunHistory(next.runs);
+    setSchedules(next.schedules);
+    setSelectedSkillId((current) => current ?? next.skills[0]?.id ?? null);
+    return next.config.dataRoot;
   }
 
   async function importSkill(): Promise<void> {
@@ -586,6 +612,35 @@ export function App(): ReactElement {
     setUseParameterForm(enabled);
   }
 
+  async function toggleCloseToTray(enabled: boolean): Promise<void> {
+    const config = await window.skillSpace.setCloseToTray(enabled);
+    setPayload((current) => (current ? { ...current, config } : current));
+  }
+
+  async function editSelectedSkillWithLlm(): Promise<void> {
+    if (!selectedSkill || !skillEditPrompt.trim()) {
+      return;
+    }
+
+    setIsEditingSkill(true);
+    setSkillEditFeedback("");
+    try {
+      const response = await window.skillSpace.editSkillWithLlm({
+        skillId: selectedSkill.id,
+        instruction: skillEditPrompt
+      });
+      const skills = await window.skillSpace.scanSkills();
+      setPayload((current) => (current ? { ...current, skills } : current));
+      setSelectedSkillDetail(response.skill);
+      setSkillEditPrompt("");
+      setSkillEditFeedback(response.summary);
+    } catch (error) {
+      setSkillEditFeedback(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsEditingSkill(false);
+    }
+  }
+
   function toggleFavoriteSkill(skillId: string): void {
     setFavoriteSkillIds((current) => {
       const next = current.includes(skillId) ? current.filter((id) => id !== skillId) : [...current, skillId];
@@ -763,6 +818,7 @@ export function App(): ReactElement {
   useEffect(() => {
     const timer = window.setInterval(() => {
       void window.skillSpace.getFeishuStatus().then(setFeishuStatus).catch(() => undefined);
+      void window.skillSpace.listFeishuDecisionLogs().then(setFeishuDecisionLogs).catch(() => undefined);
     }, 5_000);
     return () => window.clearInterval(timer);
   }, []);
@@ -889,7 +945,7 @@ export function App(): ReactElement {
         <div className="rail-footer">
           <div className="mini-status">
             <Database size={16} />
-            <span>{payload?.config.dataRoot ?? "D:\\Skill-Space"}</span>
+            <span>{payload?.config.dataRoot ?? "Skill-Space"}</span>
           </div>
         </div>
       </aside>
@@ -1051,11 +1107,19 @@ export function App(): ReactElement {
               />
             )}
 
-            {activeView === "agents" && <AgentPanel agents={payload?.agents ?? []} t={t} />}
+            {activeView === "agents" && (
+              <AgentPanel
+                agents={payload?.agents ?? []}
+                configs={payload?.config.agents ?? ({} as Record<AgentId, AgentConfig>)}
+                onSave={saveAgent}
+                t={t}
+              />
+            )}
 
             {activeView === "feishu" && (
               <FeishuPanel
                 feishuStatus={feishuStatus}
+                decisionLogs={feishuDecisionLogs}
                 locale={locale}
                 onStartFeishuConnect={() => void startFeishuConnect()}
                 onSaveFeishuConfig={(request) => void saveFeishuConfig(request)}
@@ -1123,8 +1187,12 @@ export function App(): ReactElement {
                 llmConfigMessage={llmConfigMessage}
                 useParameterForm={useParameterForm}
                 onUseParameterFormChange={toggleParameterForm}
+                closeToTray={Boolean(payload.config.window?.closeToTray)}
+                onCloseToTrayChange={(enabled) => void toggleCloseToTray(enabled)}
                 backgroundScheduler={backgroundScheduler}
                 onBackgroundSchedulerChange={(enabled) => void toggleBackgroundScheduler(enabled)}
+                onChooseStorageRoot={() => window.skillSpace.chooseStorageRoot()}
+                onSaveStorageRoot={saveStorageRoot}
                 t={t}
               />
             )}
@@ -1159,6 +1227,11 @@ export function App(): ReactElement {
                 onRunInputChange={setRunInput}
                 onRun={() => void runSelectedSkill()}
                 onSummarize={() => void summarizeSelectedSkill()}
+                skillEditPrompt={skillEditPrompt}
+                skillEditFeedback={skillEditFeedback}
+                isEditingSkill={isEditingSkill}
+                onSkillEditPromptChange={setSkillEditPrompt}
+                onEditSkill={() => void editSelectedSkillWithLlm()}
                 isRunning={isRunning}
                 isSummarizing={isSummarizing}
                 useParameterForm={useParameterForm}
@@ -1256,10 +1329,10 @@ function DashboardPanel({
           <div>
             <Wand2 size={18} />
             <strong>{t("dashboard.stewardChat")}</strong>
+            <span className={`steward-state ${llmStatus?.configured ? "ready" : "muted"}`}>
+              {llmStatus?.configured ? t("llm.ready") : t("llm.notReady")}
+            </span>
           </div>
-          <span className={`steward-state ${llmStatus?.configured ? "ready" : "muted"}`}>
-            {llmStatus?.configured ? t("llm.ready") : t("llm.notReady")}
-          </span>
           <button className="text-button compact" onClick={onClearStewardChat} type="button" disabled={isLlmBusy && stewardMessages.length === 0}>
             {t("action.clear")}
           </button>
@@ -1648,22 +1721,117 @@ function DetailBlock({ title, content }: { title: string; content?: string }): R
   );
 }
 
-function AgentPanel({ agents, t }: { agents: AgentHealth[]; t: (key: string) => string }): ReactElement {
+function parseEnvText(value: string): Record<string, string> {
+  return Object.fromEntries(
+    value
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => {
+        const index = line.indexOf("=");
+        return index > 0 ? [line.slice(0, index).trim(), line.slice(index + 1).trim()] : [line, ""];
+      })
+  );
+}
+
+function AgentPanel({
+  agents,
+  configs,
+  onSave,
+  t
+}: {
+  agents: AgentHealth[];
+  configs: Record<AgentId, AgentConfig>;
+  onSave: (agentId: AgentId, config: AgentConfig) => Promise<void>;
+  t: (key: string) => string;
+}): ReactElement {
+  const [drafts, setDrafts] = useState<Record<string, AgentConfig>>({});
+  const [savingAgentId, setSavingAgentId] = useState<AgentId | null>(null);
+
+  useEffect(() => {
+    setDrafts(configs);
+  }, [configs]);
+
+  function updateDraft(agentId: AgentId, patch: Partial<AgentConfig>): void {
+    setDrafts((current) => ({
+      ...current,
+      [agentId]: {
+        ...(current[agentId] ?? configs[agentId]),
+        ...patch
+      }
+    }));
+  }
+
+  async function saveDraft(agentId: AgentId): Promise<void> {
+    setSavingAgentId(agentId);
+    try {
+      await onSave(agentId, drafts[agentId] ?? configs[agentId]);
+    } finally {
+      window.setTimeout(() => setSavingAgentId(null), 400);
+    }
+  }
+
   return (
     <section className="agent-list">
       {agents.map((agent) => {
         const Icon = statusIcon[agent.status];
+        const draft = drafts[agent.id] ?? configs[agent.id] ?? { enabled: false, label: agent.label };
+        const argsText = (draft?.args ?? []).join("\n");
+        const envText = Object.entries(draft?.env ?? {}).map(([key, value]) => `${key}=${value}`).join("\n");
         return (
           <article className="agent-row glass-panel" key={agent.id}>
-            <div className={`agent-status ${agent.status}`}>
-              <Icon size={18} className={agent.status === "checking" ? "spin" : ""} />
+            <div className="agent-row-summary">
+              <div className={`agent-status ${agent.status}`}>
+                <Icon size={18} className={agent.status === "checking" ? "spin" : ""} />
+              </div>
+              <div>
+                <strong>{agent.label}</strong>
+                <span>{agent.command ?? agent.id}</span>
+              </div>
+              <p>{agent.detail}</p>
+              <b>{t(`status.${agent.status}`)}</b>
             </div>
-            <div>
-              <strong>{agent.label}</strong>
-              <span>{agent.command ?? agent.id}</span>
+            <div className="agent-config-grid">
+              <label>
+                <span>{t("agent.enabled")}</span>
+                <input
+                  type="checkbox"
+                  checked={Boolean(draft?.enabled)}
+                  onChange={(event) => updateDraft(agent.id, { enabled: event.target.checked })}
+                />
+              </label>
+              <label>
+                <span>{t("agent.label")}</span>
+                <input value={draft?.label ?? ""} onChange={(event) => updateDraft(agent.id, { label: event.target.value })} />
+              </label>
+              <label>
+                <span>{t("agent.command")}</span>
+                <input value={draft?.command ?? ""} onChange={(event) => updateDraft(agent.id, { command: event.target.value })} />
+              </label>
+              <label>
+                <span>{t("agent.cwd")}</span>
+                <input value={draft?.cwd ?? ""} onChange={(event) => updateDraft(agent.id, { cwd: event.target.value })} />
+              </label>
+              <label className="agent-config-wide">
+                <span>{t("agent.args")}</span>
+                <textarea
+                  value={argsText}
+                  onChange={(event) => updateDraft(agent.id, { args: event.target.value.split(/\r?\n/) })}
+                />
+              </label>
+              <label className="agent-config-wide">
+                <span>{t("agent.env")}</span>
+                <textarea
+                  value={envText}
+                  onChange={(event) => updateDraft(agent.id, { env: parseEnvText(event.target.value) })}
+                  placeholder="KEY=value"
+                />
+              </label>
+              <button className="secondary-button" onClick={() => void saveDraft(agent.id)} type="button" disabled={savingAgentId === agent.id}>
+                {savingAgentId === agent.id ? <Loader2 size={15} className="spin" /> : <CheckCircle2 size={15} />}
+                <span>{t("action.save")}</span>
+              </button>
             </div>
-            <p>{agent.detail}</p>
-            <b>{t(`status.${agent.status}`)}</b>
           </article>
         );
       })}
@@ -2033,6 +2201,7 @@ function AutomationPanel({
 
 function FeishuPanel({
   feishuStatus,
+  decisionLogs,
   onStartFeishuConnect,
   onSaveFeishuConfig,
   onFeishuEnabledChange,
@@ -2041,6 +2210,7 @@ function FeishuPanel({
   t
 }: {
   feishuStatus: FeishuStatus | null;
+  decisionLogs: FeishuDecisionLogEntry[];
   locale: Locale;
   onStartFeishuConnect: () => void;
   onSaveFeishuConfig: (request: {
@@ -2216,6 +2386,33 @@ function FeishuPanel({
             <span>{t("feishu.commandStatus")}</span>
             <code>/skill run skill-id 输入内容</code>
             <span>{t("feishu.commandRun")}</span>
+            <code>/skill decisions</code>
+            <span>{t("feishu.commandDecisions")}</span>
+          </div>
+        </article>
+
+        <article className="feishu-card feishu-decision-log glass-panel">
+          <div className="section-title">
+            <div>
+              <GitCompare size={18} />
+              <strong>{t("feishu.decisions")}</strong>
+            </div>
+            <time>{decisionLogs[0]?.at ? formatDate(decisionLogs[0].at, locale) : t("view.none")}</time>
+          </div>
+          <div className="decision-list">
+            {decisionLogs.length === 0 ? (
+              <p>{t("feishu.noDecisions")}</p>
+            ) : (
+              decisionLogs.slice(0, 6).map((entry) => (
+                <div className="decision-row" key={entry.id}>
+                  <div>
+                    <strong>{entry.action}</strong>
+                    <span>{entry.reason}</span>
+                  </div>
+                  <code title={entry.message}>{entry.skillId || entry.runId || entry.message}</code>
+                </div>
+              ))
+            )}
           </div>
         </article>
         </div>
@@ -2236,8 +2433,12 @@ function SettingsPanel({
   llmConfigMessage,
   useParameterForm,
   onUseParameterFormChange,
+  closeToTray,
+  onCloseToTrayChange,
   backgroundScheduler,
   onBackgroundSchedulerChange,
+  onChooseStorageRoot,
+  onSaveStorageRoot,
   t
 }: {
   payload: BootstrapPayload;
@@ -2257,8 +2458,12 @@ function SettingsPanel({
   llmConfigMessage: string;
   useParameterForm: boolean;
   onUseParameterFormChange: (enabled: boolean) => void;
+  closeToTray: boolean;
+  onCloseToTrayChange: (enabled: boolean) => void;
   backgroundScheduler: BackgroundSchedulerStatus | null;
   onBackgroundSchedulerChange: (enabled: boolean) => void;
+  onChooseStorageRoot: () => Promise<string | null>;
+  onSaveStorageRoot: (dataRoot: string) => Promise<string>;
   t: (key: string) => string;
 }): ReactElement {
   const [llmEnabled, setLlmEnabled] = useState(Boolean(llmStatus?.enabled ?? true));
@@ -2266,6 +2471,9 @@ function SettingsPanel({
   const [llmModel, setLlmModel] = useState(llmStatus?.model ?? "skill-space-steward");
   const [llmBaseUrl, setLlmBaseUrl] = useState(llmStatus?.baseUrl ?? "");
   const [llmApiKey, setLlmApiKey] = useState("");
+  const [storageRoot, setStorageRoot] = useState(payload.config.dataRoot);
+  const [storageMessage, setStorageMessage] = useState("");
+  const [isSavingStorage, setIsSavingStorage] = useState(false);
 
   useEffect(() => {
     setLlmEnabled(Boolean(llmStatus?.enabled ?? true));
@@ -2273,6 +2481,10 @@ function SettingsPanel({
     setLlmModel(llmStatus?.model ?? "skill-space-steward");
     setLlmBaseUrl(llmStatus?.baseUrl ?? "");
   }, [llmStatus?.baseUrl, llmStatus?.enabled, llmStatus?.model, llmStatus?.provider]);
+
+  useEffect(() => {
+    setStorageRoot(payload.config.dataRoot);
+  }, [payload.config.dataRoot]);
 
   function chooseLlmProvider(provider: LlmProvider): void {
     const next = llmProviderOptions.find((item) => item.id === provider);
@@ -2283,6 +2495,28 @@ function SettingsPanel({
     }
     if (next && (!llmBaseUrl.trim() || llmBaseUrl === previous?.baseUrl)) {
       setLlmBaseUrl(next.baseUrl ?? "");
+    }
+  }
+
+  async function chooseStorageRoot(): Promise<void> {
+    const selected = await onChooseStorageRoot();
+    if (selected) {
+      setStorageRoot(selected);
+      setStorageMessage("");
+    }
+  }
+
+  async function saveStorage(): Promise<void> {
+    setIsSavingStorage(true);
+    setStorageMessage("");
+    try {
+      const saved = await onSaveStorageRoot(storageRoot);
+      setStorageRoot(saved);
+      setStorageMessage(t("settings.storageSaved"));
+    } catch (error) {
+      setStorageMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsSavingStorage(false);
     }
   }
 
@@ -2368,6 +2602,19 @@ function SettingsPanel({
         </label>
       </article>
       <article className="settings-card glass-panel">
+        <CircleOff size={19} />
+        <label>{t("settings.closeToTray")}</label>
+        <p>{t("settings.closeToTrayHint")}</p>
+        <label className="switch-row">
+          <input
+            type="checkbox"
+            checked={closeToTray}
+            onChange={(event) => onCloseToTrayChange(event.target.checked)}
+          />
+          <span>{closeToTray ? t("action.enabled") : t("action.disabled")}</span>
+        </label>
+      </article>
+      <article className="settings-card glass-panel">
         <AlarmClock size={19} />
         <label>{t("settings.backgroundScheduler")}</label>
         <p>{backgroundScheduler?.detail ?? t("status.checking")}</p>
@@ -2385,6 +2632,21 @@ function SettingsPanel({
             <span>
               {t("settings.schedulerSilent")}: <b>{backgroundScheduler.silent ? t("action.enabled") : t("action.disabled")}</b>
             </span>
+            {backgroundScheduler.lastError && (
+              <span className="scheduler-error">
+                {t("settings.schedulerLastError")}: <b>{backgroundScheduler.lastError}</b>
+              </span>
+            )}
+          </div>
+        )}
+        {backgroundScheduler?.recentErrors && backgroundScheduler.recentErrors.length > 0 && (
+          <div className="scheduler-errors">
+            <strong>{t("settings.schedulerErrors")}</strong>
+            {backgroundScheduler.recentErrors.slice(0, 3).map((error) => (
+              <span key={error.id}>
+                {formatDate(error.at, locale)} · {error.taskName || error.phase}: {error.message}
+              </span>
+            ))}
           </div>
         )}
         <label className="switch-row">
@@ -2400,7 +2662,19 @@ function SettingsPanel({
       <article className="settings-card glass-panel">
         <Database size={19} />
         <label>{t("settings.storage")}</label>
-        <strong>{payload.config.dataRoot}</strong>
+        <p>{t("settings.storageHint")}</p>
+        <div className="storage-root-editor">
+          <input value={storageRoot} onChange={(event) => setStorageRoot(event.target.value)} />
+          <button className="secondary-button" onClick={() => void chooseStorageRoot()} type="button">
+            <FolderOpen size={15} />
+            <span>{t("action.choose")}</span>
+          </button>
+          <button className="secondary-button" onClick={() => void saveStorage()} type="button" disabled={isSavingStorage}>
+            {isSavingStorage ? <Loader2 size={15} className="spin" /> : <CheckCircle2 size={15} />}
+            <span>{t("action.save")}</span>
+          </button>
+        </div>
+        {storageMessage && <div className="inline-status">{storageMessage}</div>}
       </article>
       <article className="settings-card glass-panel">
         <Bot size={19} />
@@ -2549,6 +2823,11 @@ function SkillInspector({
   onRunInputChange,
   onRun,
   onSummarize,
+  skillEditPrompt,
+  skillEditFeedback,
+  isEditingSkill,
+  onSkillEditPromptChange,
+  onEditSkill,
   isRunning,
   isSummarizing,
   useParameterForm,
@@ -2568,6 +2847,11 @@ function SkillInspector({
   onRunInputChange: (input: string) => void;
   onRun: () => void;
   onSummarize: () => void;
+  skillEditPrompt: string;
+  skillEditFeedback: string;
+  isEditingSkill: boolean;
+  onSkillEditPromptChange: (value: string) => void;
+  onEditSkill: () => void;
   isRunning: boolean;
   isSummarizing: boolean;
   useParameterForm: boolean;
@@ -2692,6 +2976,28 @@ function SkillInspector({
       </div>
 
       <DetailBlock title={t("view.skillMd")} content={skillMarkdown} />
+      <div className="skill-edit-card detail-block">
+        <div className="detail-block-title">
+          <Wand2 size={15} />
+          <strong>{t("skill.editWithLlm")}</strong>
+        </div>
+        <textarea
+          value={skillEditPrompt}
+          onChange={(event) => onSkillEditPromptChange(event.target.value)}
+          placeholder={t("skill.editPlaceholder")}
+          disabled={!detail || isEditingSkill}
+        />
+        <button
+          className="primary-button wide"
+          onClick={onEditSkill}
+          type="button"
+          disabled={!detail || isEditingSkill || !skillEditPrompt.trim()}
+        >
+          {isEditingSkill ? <Loader2 size={16} className="spin" /> : <Wand2 size={16} />}
+          <span>{t("skill.applyEdit")}</span>
+        </button>
+        {skillEditFeedback && <p>{skillEditFeedback}</p>}
+      </div>
       <DetailBlock title={t("view.workflowYaml")} content={workflowText} />
       <DetailBlock title={t("view.schema")} content={schemaText} />
       <DetailBlock title={t("view.permissions")} content={permissionsText} />

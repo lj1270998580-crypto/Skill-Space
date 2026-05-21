@@ -13,6 +13,8 @@ export interface AgentConfig {
   label: string;
   command?: string;
   args?: string[];
+  cwd?: string;
+  env?: Record<string, string>;
   reason?: string;
 }
 
@@ -32,6 +34,9 @@ export interface SkillSpaceConfig {
     path: string;
   };
   agents: Record<AgentId, AgentConfig>;
+  window: {
+    closeToTray: boolean;
+  };
 }
 
 export interface AgentHealth {
@@ -177,6 +182,16 @@ export interface ImportSkillResponse {
   message: string;
 }
 
+export interface EditSkillWithLlmRequest {
+  skillId: string;
+  instruction: string;
+}
+
+export interface EditSkillWithLlmResponse {
+  skill: SkillDetail;
+  summary: string;
+}
+
 export interface DeleteRunResponse {
   deleted: boolean;
 }
@@ -279,6 +294,28 @@ export interface BackgroundSchedulerStatus {
   lastRunAt?: string;
   lastResult?: string;
   silent?: boolean;
+  lastErrorAt?: string;
+  lastError?: string;
+  recentErrors?: SchedulerErrorEntry[];
+}
+
+export interface SchedulerErrorEntry {
+  id: string;
+  at: string;
+  phase: string;
+  message: string;
+  taskId?: string;
+  taskName?: string;
+  skillId?: string;
+}
+
+export interface SaveAgentConfigRequest {
+  agentId: AgentId;
+  config: AgentConfig;
+}
+
+export interface SaveStorageRootRequest {
+  dataRoot: string;
 }
 
 export type FeishuReceiveIdType = "open_id" | "chat_id";
@@ -315,9 +352,24 @@ export interface StartFeishuConnectRequest {
   domain?: "feishu" | "lark";
 }
 
+export interface FeishuDecisionLogEntry {
+  id: string;
+  at: string;
+  action: string;
+  reason: string;
+  message: string;
+  skillId?: string;
+  runId?: string;
+  confidence?: number;
+  replyPreview?: string;
+}
+
 export interface SkillSpaceApi {
   bootstrap(): Promise<BootstrapPayload>;
   refreshAgents(): Promise<AgentHealth[]>;
+  saveAgentConfig(request: SaveAgentConfigRequest): Promise<BootstrapPayload>;
+  chooseStorageRoot(): Promise<string | null>;
+  saveStorageRoot(request: SaveStorageRootRequest): Promise<BootstrapPayload>;
   scanSkills(): Promise<SkillSummary[]>;
   discoverSkills(): Promise<DiscoveredSkill[]>;
   importDiscoveredSkill(root: string): Promise<ImportSkillResponse>;
@@ -330,6 +382,7 @@ export interface SkillSpaceApi {
   getSkillDetail(skillId: string): Promise<SkillDetail>;
   deleteSkill(skillId: string): Promise<{ deleted: boolean }>;
   summarizeSkill(skillId: string): Promise<SummarizeSkillResponse>;
+  editSkillWithLlm(request: EditSkillWithLlmRequest): Promise<EditSkillWithLlmResponse>;
   classifySkillTags(): Promise<ClassifySkillTagsResponse>;
   importSkill(): Promise<ImportSkillResponse>;
   runSkill(request: RunSkillRequest): Promise<RunSkillResponse>;
@@ -345,6 +398,7 @@ export interface SkillSpaceApi {
   saveFeishuConfig(request: SaveFeishuConfigRequest): Promise<FeishuStatus>;
   setFeishuEnabled(enabled: boolean): Promise<FeishuStatus>;
   sendFeishuTest(message?: string): Promise<FeishuStatus>;
+  listFeishuDecisionLogs(): Promise<FeishuDecisionLogEntry[]>;
   getLlmStatus(): Promise<LlmManagerStatus>;
   saveLlmConfig(request: SaveLlmConfigRequest): Promise<LlmManagerStatus>;
   askLlm(request: LlmAnalyzeRequest): Promise<LlmAnalyzeResponse>;
@@ -352,6 +406,7 @@ export interface SkillSpaceApi {
   checkForUpdates(): Promise<UpdateStatus>;
   downloadUpdate(): Promise<UpdateStatus>;
   installUpdate(): Promise<void>;
+  setCloseToTray(enabled: boolean): Promise<SkillSpaceConfig>;
   minimizeWindow(): Promise<void>;
   toggleMaximizeWindow(): Promise<void>;
   closeWindow(): Promise<void>;

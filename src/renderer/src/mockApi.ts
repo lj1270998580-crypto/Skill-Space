@@ -8,10 +8,10 @@ const mockRuns: RunSummary[] = [
     skillId: "skill-space-smoke-test",
     skillName: "Skill-Space Smoke Test",
     runtime: "codex",
-      status: "completed",
+    status: "completed",
     startedAt: now,
     endedAt: now,
-    input: "验证技能是否可被发现并运行。",
+    input: "Validate that Skill-Space can find and run a portable skill.",
     exitCode: 0,
     runRoot: "D:\\Skill-Space\\runs\\mock-run-20260517",
     logPath: "D:\\Skill-Space\\runs\\mock-run-20260517\\events.jsonl"
@@ -39,10 +39,13 @@ const mockPayload: BootstrapPayload = {
       path: "D:\\Skill-Space\\registry\\skillspace.sqlite"
     },
     agents: {
-      claude: { enabled: true, label: "Claude Code" },
-      hermes: { enabled: true, label: "Hermes Agent" },
-      openclaw: { enabled: true, label: "OpenClaw" },
-      codex: { enabled: true, label: "Codex" }
+      claude: { enabled: true, label: "Claude Code", command: "claude" },
+      hermes: { enabled: true, label: "Hermes Agent", command: "wsl", args: ["-d", "Ubuntu", "--", "hermes", "{{prompt}}"] },
+      openclaw: { enabled: true, label: "OpenClaw", command: "openclaw" },
+      codex: { enabled: true, label: "Codex", command: "codex" }
+    },
+    window: {
+      closeToTray: false
     }
   },
   agents: [
@@ -60,7 +63,7 @@ const mockPayload: BootstrapPayload = {
       label: "Hermes Agent",
       enabled: true,
       status: "online",
-      detail: "WSL Ubuntu-24.04",
+      detail: "WSL Ubuntu",
       command: "wsl",
       checkedAt: now
     },
@@ -87,24 +90,24 @@ const mockPayload: BootstrapPayload = {
     {
       id: "skill-space-capture",
       name: "Skill-Space Capture",
-      description: "将可复用 AI Agent 工作流转换为通用 SKILL.md 技能，并补充 Skill-Space 可视化元数据。",
+      description: "Convert reusable AI agent workflows into portable SKILL.md packages and Skill-Space metadata.",
       version: "0.1.0",
       defaultRuntime: "claude",
       runtimes: ["claude", "hermes", "openclaw", "codex"],
       root: "D:\\Skill-Space\\skills\\skill-space-capture",
-      tags: ["skillops", "automation", "workflow"],
+      tags: ["skillops"],
       hasSkillSpaceMetadata: true,
       updatedAt: now
     },
     {
       id: "skill-space-smoke-test",
       name: "Skill-Space Smoke Test",
-      description: "验证 Skill-Space 能否发现、展示并运行通用 SKILL.md 技能包。",
+      description: "Verify that Skill-Space can discover, display, and run a generic SKILL.md package.",
       version: "0.1.0",
       defaultRuntime: "codex",
       runtimes: ["claude", "codex", "hermes", "openclaw"],
       root: "D:\\Skill-Space\\skills\\skill-space-smoke-test",
-      tags: ["smoke-test", "skillspace"],
+      tags: ["test"],
       hasSkillSpaceMetadata: true,
       updatedAt: now
     }
@@ -142,6 +145,21 @@ export function installMockApiWhenMissing(): void {
   window.skillSpace = {
     bootstrap: async () => mockPayload,
     refreshAgents: async () => mockPayload.agents,
+    saveAgentConfig: async (request) => {
+      mockPayload.config.agents[request.agentId] = request.config;
+      return mockPayload;
+    },
+    chooseStorageRoot: async () => "D:\\Skill-Space",
+    saveStorageRoot: async (request) => {
+      mockPayload.config.dataRoot = request.dataRoot;
+      mockPayload.config.skillRoots = [`${request.dataRoot}\\skills`];
+      mockPayload.config.importRoot = `${request.dataRoot}\\imports`;
+      mockPayload.config.runsRoot = `${request.dataRoot}\\runs`;
+      mockPayload.config.logsRoot = `${request.dataRoot}\\logs`;
+      mockPayload.config.artifactsRoot = `${request.dataRoot}\\artifacts`;
+      mockPayload.config.registry.path = `${request.dataRoot}\\registry\\skillspace.sqlite`;
+      return mockPayload;
+    },
     scanSkills: async () => mockPayload.skills,
     discoverSkills: async () => [],
     importDiscoveredSkill: async () => ({ imported: false, message: "Mock preview does not import files." }),
@@ -163,9 +181,19 @@ export function installMockApiWhenMissing(): void {
     deleteSkill: async () => ({ deleted: true }),
     summarizeSkill: async (skillId: string) => ({
       skill: mockPayload.skills.find((skill) => skill.id === skillId) ?? mockPayload.skills[0],
-      summary: "这个技能用于把可复用工作流沉淀为通用 SKILL.md，并同步到 Skill-Space 管理。"
+      summary: "This mock summary explains the selected skill in plain language."
     }),
-    classifySkillTags: async () => ({ skills: mockPayload.skills.map((skill) => ({ ...skill, tags: [skill.tags[0] ?? "通用"] })) }),
+    editSkillWithLlm: async (request) => {
+      const detail = mockDetails[request.skillId] ?? mockDetails["skill-space-capture"];
+      return {
+        skill: {
+          ...detail,
+          skillMarkdown: `${detail.skillMarkdown}\n\n## Mock Edit\n\n${request.instruction}`
+        },
+        summary: "Mock preview generated a SKILL.md update proposal."
+      };
+    },
+    classifySkillTags: async () => ({ skills: mockPayload.skills.map((skill) => ({ ...skill, tags: [skill.tags[0] ?? "general"] })) }),
     importSkill: async () => ({
       imported: false,
       message: "Mock preview does not import files."
@@ -206,13 +234,15 @@ export function installMockApiWhenMissing(): void {
       supported: true,
       enabled: false,
       taskName: "Skill-Space Background Scheduler",
-      detail: "Mock preview scheduler."
+      detail: "Mock preview scheduler.",
+      recentErrors: []
     }),
     setBackgroundScheduler: async (enabled) => ({
       supported: true,
       enabled,
       taskName: "Skill-Space Background Scheduler",
-      detail: enabled ? "Mock background scheduler enabled." : "Mock background scheduler disabled."
+      detail: enabled ? "Mock background scheduler enabled." : "Mock background scheduler disabled.",
+      recentErrors: []
     }),
     getFeishuStatus: async () => ({
       enabled: false,
@@ -261,12 +291,21 @@ export function installMockApiWhenMissing(): void {
       receiveIdType: "open_id",
       canSend: true
     }),
+    listFeishuDecisionLogs: async () => [
+      {
+        id: "mock-decision",
+        at: now,
+        action: "chat",
+        reason: "Mock preview routed this as a steward chat.",
+        message: "hello"
+      }
+    ],
     getLlmStatus: async () => ({
       enabled: true,
       configured: true,
       provider: "claude-code",
       model: "skill-space-steward",
-      identity: "Skill-Space 管家",
+      identity: "Skill-Space Steward",
       detail: "Mock preview Skill-Space steward is ready."
     }),
     saveLlmConfig: async (request) => ({
@@ -275,29 +314,33 @@ export function installMockApiWhenMissing(): void {
       provider: request.provider,
       model: request.model,
       baseUrl: request.baseUrl,
-      identity: "Skill-Space 管家",
+      identity: "Skill-Space Steward",
       detail: "Mock preview LLM config saved."
     }),
-    askLlm: async () => ({ result: "这是 Skill-Space 的本地 LLM 分析结果预览。" }),
+    askLlm: async () => ({ result: "This is a mock Skill-Space steward response." }),
     getUpdateStatus: async () => ({
-      currentVersion: "0.1.1",
+      currentVersion: "0.1.8",
       state: "idle",
       detail: "Mock preview updater is ready."
     }),
     checkForUpdates: async () => ({
-      currentVersion: "0.1.1",
+      currentVersion: "0.1.8",
       state: "not_available",
       detail: "Mock preview is already up to date.",
       lastCheckedAt: now
     }),
     downloadUpdate: async () => ({
-      currentVersion: "0.1.1",
+      currentVersion: "0.1.8",
       state: "downloaded",
       detail: "Mock preview update downloaded.",
-      availableVersion: "0.1.1",
+      availableVersion: "0.1.8",
       downloaded: true
     }),
     installUpdate: async () => undefined,
+    setCloseToTray: async (enabled) => {
+      mockPayload.config.window.closeToTray = enabled;
+      return mockPayload.config;
+    },
     minimizeWindow: async () => {
       document.body.classList.add("preview-minimized");
       window.setTimeout(() => document.body.classList.remove("preview-minimized"), 700);

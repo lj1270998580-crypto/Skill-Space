@@ -1,10 +1,10 @@
-import { app, BrowserWindow, dialog, ipcMain, safeStorage, shell, type OpenDialogOptions } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, safeStorage, shell, Tray, type OpenDialogOptions } from "electron";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { cp, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { basename, dirname, extname, join, relative, resolve } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
 import QRCode from "qrcode";
 import type {
   AgentConfig,
@@ -17,6 +17,8 @@ import type {
   ContinueRunResponse,
   CreateScheduleRequest,
   DiscoveredSkill,
+  EditSkillWithLlmRequest,
+  EditSkillWithLlmResponse,
   FeishuReceiveIdType,
   FeishuStatus,
   ImportSkillResponse,
@@ -24,13 +26,16 @@ import type {
   LlmAnalyzeResponse,
   LlmManagerStatus,
   LlmProvider,
+  FeishuDecisionLogEntry,
   RunEvent,
   RunArtifact,
   RunSkillRequest,
   RunSkillResponse,
   RunSummary,
+  SaveAgentConfigRequest,
   SaveFeishuConfigRequest,
   SaveLlmConfigRequest,
+  SaveStorageRootRequest,
   ScheduledTask,
   SkillChange,
   SkillDetail,
@@ -42,7 +47,28 @@ import type {
 
 const nodeRequire = createRequire(import.meta.url);
 const { autoUpdater } = nodeRequire("electron-updater") as typeof import("electron-updater");
-const configPath = "D:\\Skill-Space\\config\\skillspace.config.json";
+const legacyConfigPath = "D:\\Skill-Space\\config\\skillspace.config.json";
+
+function defaultDataRoot(): string {
+  if (process.platform === "win32") {
+    return join(process.env.APPDATA ?? join(process.env.USERPROFILE ?? "C:\\", "AppData", "Roaming"), "Skill-Space");
+  }
+  return join(process.env.HOME ?? ".", ".skill-space");
+}
+
+function activeConfigPath(): string {
+  return join(defaultDataRoot(), "config", "skillspace.config.json");
+}
+
+function isPathInside(parent: string, target: string, allowEqual = false): boolean {
+  const resolvedParent = resolve(parent);
+  const resolvedTarget = resolve(target);
+  if (allowEqual && resolvedParent === resolvedTarget) {
+    return true;
+  }
+  const distance = relative(resolvedParent, resolvedTarget);
+  return Boolean(distance) && !distance.startsWith("..") && !isAbsolute(distance);
+}
 
 function bundledResourcePath(fileName: string): string {
   return app.isPackaged
@@ -53,6 +79,9 @@ function bundledResourcePath(fileName: string): string {
 const appIconPath = bundledResourcePath(process.platform === "win32" ? "skill-space-liquid.ico" : "skill-space.png");
 
 let mainWindow: BrowserWindow | null = null;
+let tray: Tray | null = null;
+let closeToTrayEnabled = false;
+let isQuitting = false;
 let schedulerTimer: NodeJS.Timeout | null = null;
 let feishuChannel: { connect?: () => Promise<void>; disconnect?: () => Promise<void>; send?: (to: string, input: { text: string } | { markdown: string }) => Promise<unknown>; on?: (...args: unknown[]) => unknown } | null = null;
 let feishuRuntimeState: FeishuStatus["state"] = "not_configured";
@@ -106,7 +135,7 @@ type LlmConversationMessage = {
 
 const fallbackConfig: SkillSpaceConfig = {
   schemaVersion: "skillspace.config.v1",
-  dataRoot: "D:\\Skill-Space",
+  dataRoot: defaultDataRoot(),
   defaultRuntime: "claude",
   permissionsMode: "full",
   locale: {
@@ -114,14 +143,14 @@ const fallbackConfig: SkillSpaceConfig = {
     supported: ["zh-CN", "en-US"],
     fallback: "en-US"
   },
-  skillRoots: ["D:\\Skill-Space\\skills"],
-  importRoot: "D:\\Skill-Space\\imports",
-  runsRoot: "D:\\Skill-Space\\runs",
-  logsRoot: "D:\\Skill-Space\\logs",
-  artifactsRoot: "D:\\Skill-Space\\artifacts",
+  skillRoots: [join(defaultDataRoot(), "skills")],
+  importRoot: join(defaultDataRoot(), "imports"),
+  runsRoot: join(defaultDataRoot(), "runs"),
+  logsRoot: join(defaultDataRoot(), "logs"),
+  artifactsRoot: join(defaultDataRoot(), "artifacts"),
   registry: {
     type: "sqlite",
-    path: "D:\\Skill-Space\\registry\\skillspace.sqlite"
+    path: join(defaultDataRoot(), "registry", "skillspace.sqlite")
   },
   agents: {
     claude: {
@@ -134,7 +163,7 @@ const fallbackConfig: SkillSpaceConfig = {
       enabled: true,
       label: "Hermes Agent",
       command: "wsl",
-      args: ["-d", "Ubuntu-24.04", "--", "/home/jaygo/.local/bin/hermes", "-z", "{{prompt}}"]
+      args: ["-d", "Ubuntu", "--", "hermes", "-z", "{{prompt}}"]
     },
     openclaw: {
       enabled: true,
@@ -157,6 +186,9 @@ const fallbackConfig: SkillSpaceConfig = {
         "{{prompt}}"
       ]
     }
+  },
+  window: {
+    closeToTray: false
   }
 };
 
@@ -193,17 +225,173 @@ function backgroundSchedulerWrapperPath(config: SkillSpaceConfig): string {
   return join(scheduleRoot(config), "background-scheduler.vbs");
 }
 
+function schedulerErrorsPath(config: SkillSpaceConfig): string {
+  return join(scheduleRoot(config), "scheduler-errors.jsonl");
+}
+
+async function appendSchedulerError(
+  config: SkillSpaceConfig,
+  entry: { phase: string; message: string; taskId?: string; taskName?: string; skillId?: string }
+): Promise<void> {
+  const next = {
+    id: randomUUID(),
+    at: new Date().toISOString(),
+    ...entry
+  };
+  await mkdir(dirname(schedulerErrorsPath(config)), { recursive: true });
+  await writeFile(schedulerErrorsPath(config), `${JSON.stringify(next)}\n`, { flag: "a" });
+}
+
+async function readSchedulerErrors(config: SkillSpaceConfig, limit = 8): Promise<BackgroundSchedulerStatus["recentErrors"]> {
+  const path = schedulerErrorsPath(config);
+  if (!existsSync(path)) {
+    return [];
+  }
+  const text = await readFile(path, "utf8");
+  return text
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .slice(-limit)
+    .reverse()
+    .map((line) => JSON.parse(line) as NonNullable<BackgroundSchedulerStatus["recentErrors"]>[number]);
+}
+
 async function ensureConfig(): Promise<SkillSpaceConfig> {
+  const configPath = activeConfigPath();
+  const shouldMigrateLegacy = !existsSync(configPath) && existsSync(legacyConfigPath);
+  const sourcePath = shouldMigrateLegacy ? legacyConfigPath : configPath;
+
   if (!existsSync(configPath)) {
-    await mkdir(dirname(configPath), { recursive: true });
-    await writeFile(configPath, `${JSON.stringify(fallbackConfig, null, 2)}\n`, "utf8");
-    await ensureDataDirs(fallbackConfig);
-    return fallbackConfig;
+    if (shouldMigrateLegacy) {
+      await mkdir(dirname(configPath), { recursive: true });
+      await cp(legacyConfigPath, configPath, { force: false });
+    } else {
+      await mkdir(dirname(configPath), { recursive: true });
+      await writeFile(configPath, `${JSON.stringify(fallbackConfig, null, 2)}\n`, "utf8");
+      await ensureDataDirs(fallbackConfig);
+      closeToTrayEnabled = fallbackConfig.window.closeToTray;
+      return fallbackConfig;
+    }
   }
 
-  const config = JSON.parse(await readFile(configPath, "utf8")) as SkillSpaceConfig;
+  const loaded = JSON.parse(await readFile(sourcePath, "utf8")) as Partial<SkillSpaceConfig>;
+  const config: SkillSpaceConfig = {
+    ...fallbackConfig,
+    ...loaded,
+    locale: {
+      ...fallbackConfig.locale,
+      ...(loaded.locale ?? {})
+    },
+    registry: {
+      ...fallbackConfig.registry,
+      ...(loaded.registry ?? {})
+    },
+    agents: {
+      ...fallbackConfig.agents,
+      ...(loaded.agents ?? {})
+    },
+    window: {
+      ...fallbackConfig.window,
+      ...(loaded.window ?? {})
+    }
+  };
+  closeToTrayEnabled = Boolean(config.window.closeToTray);
   await ensureDataDirs(config);
   return config;
+}
+
+async function writeConfig(config: SkillSpaceConfig): Promise<void> {
+  const configPath = activeConfigPath();
+  await mkdir(dirname(configPath), { recursive: true });
+  await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+  closeToTrayEnabled = Boolean(config.window.closeToTray);
+}
+
+async function setCloseToTray(config: SkillSpaceConfig, enabled: boolean): Promise<SkillSpaceConfig> {
+  const next = {
+    ...config,
+    window: {
+      ...config.window,
+      closeToTray: enabled
+    }
+  };
+  await writeConfig(next);
+  if (enabled) {
+    ensureTray();
+  } else if (tray) {
+    tray.destroy();
+    tray = null;
+  }
+  return next;
+}
+
+function rebaseDataPath(oldRoot: string, newRoot: string, value: string): string {
+  if (resolve(value) === resolve(oldRoot)) {
+    return newRoot;
+  }
+  if (isPathInside(oldRoot, value)) {
+    return join(newRoot, relative(resolve(oldRoot), resolve(value)));
+  }
+  return value;
+}
+
+async function copyDataRootChildren(oldRoot: string, newRoot: string): Promise<void> {
+  if (resolve(oldRoot) === resolve(newRoot) || isPathInside(oldRoot, newRoot)) {
+    return;
+  }
+  if (!existsSync(oldRoot)) {
+    return;
+  }
+
+  await mkdir(newRoot, { recursive: true });
+  const entries = await readdir(oldRoot, { withFileTypes: true });
+  await Promise.all(
+    entries.map(async (entry) => {
+      const source = join(oldRoot, entry.name);
+      const destination = join(newRoot, entry.name);
+      try {
+        await cp(source, destination, { recursive: entry.isDirectory(), force: false, errorOnExist: false });
+      } catch {
+        // Existing files should not block changing the storage root.
+      }
+    })
+  );
+}
+
+async function chooseStorageRoot(): Promise<string | null> {
+  const result = await dialog.showOpenDialog({
+    title: "Select Skill-Space storage folder",
+    properties: ["openDirectory", "createDirectory"]
+  });
+  return result.canceled ? null : result.filePaths[0] ?? null;
+}
+
+async function saveStorageRoot(config: SkillSpaceConfig, request: SaveStorageRootRequest): Promise<BootstrapPayload> {
+  const dataRoot = request.dataRoot.trim();
+  if (!dataRoot) {
+    throw new Error("Storage path cannot be empty.");
+  }
+
+  const oldRoot = config.dataRoot;
+  const nextRoot = resolve(dataRoot);
+  await copyDataRootChildren(oldRoot, nextRoot);
+
+  const nextConfig: SkillSpaceConfig = {
+    ...config,
+    dataRoot: nextRoot,
+    importRoot: rebaseDataPath(oldRoot, nextRoot, config.importRoot),
+    runsRoot: rebaseDataPath(oldRoot, nextRoot, config.runsRoot),
+    logsRoot: rebaseDataPath(oldRoot, nextRoot, config.logsRoot),
+    artifactsRoot: rebaseDataPath(oldRoot, nextRoot, config.artifactsRoot),
+    skillRoots: config.skillRoots.map((root) => rebaseDataPath(oldRoot, nextRoot, root)),
+    registry: {
+      ...config.registry,
+      path: rebaseDataPath(oldRoot, nextRoot, config.registry.path)
+    }
+  };
+  await writeConfig(nextConfig);
+  await ensureDataDirs(nextConfig);
+  return bootstrap();
 }
 
 function windowsCommand(command: string): string {
@@ -225,7 +413,7 @@ function shouldUseShell(command: string): boolean {
 function runProcess(
   command: string,
   args: string[],
-  options: { timeoutMs?: number; cwd?: string } = {}
+  options: { timeoutMs?: number; cwd?: string; env?: Record<string, string> } = {}
 ): Promise<{ code: number | null; output: string }> {
   return new Promise((resolve) => {
     const executable = windowsCommand(command);
@@ -233,6 +421,7 @@ function runProcess(
     try {
       child = spawn(executable, args, {
         cwd: options.cwd,
+        env: options.env ? { ...process.env, ...options.env } : process.env,
         windowsHide: true,
         shell: shouldUseShell(executable)
       });
@@ -267,9 +456,15 @@ function healthProbe(id: AgentId, agent: AgentConfig): { command?: string; args:
   }
 
   if (id === "hermes") {
+    const configuredArgs = agent.args ?? fallbackConfig.agents.hermes.args ?? [];
+    const promptIndex = configuredArgs.indexOf("{{prompt}}");
+    const args =
+      promptIndex > 0
+        ? [...configuredArgs.slice(0, promptIndex - 1), "--version"]
+        : [...configuredArgs, "--version"];
     return {
-      command: "wsl",
-      args: ["-d", "Ubuntu-24.04", "--", "/home/jaygo/.local/bin/hermes", "--version"]
+      command: agent.command,
+      args
     };
   }
 
@@ -306,7 +501,7 @@ async function checkAgent(id: AgentId, agent: AgentConfig): Promise<AgentHealth>
     };
   }
 
-  const result = await runProcess(probe.command, probe.args, { timeoutMs: 12_000 });
+  const result = await runProcess(probe.command, probe.args, { timeoutMs: 12_000, cwd: agent.cwd, env: agent.env });
   const detail = normalizeAgentDetail(id, result.output, result.code === 0);
   return {
     id,
@@ -321,20 +516,47 @@ async function checkAgent(id: AgentId, agent: AgentConfig): Promise<AgentHealth>
 
 function normalizeAgentDetail(id: AgentId, output: string, online: boolean): string {
   const singleLine = output.replace(/\s+/g, " ").trim();
-  const invalidCount = (singleLine.match(/[�□]/g) ?? []).length;
+  const invalidCount = (singleLine.match(/[锟解枴]/g) ?? []).length;
   if (!singleLine || invalidCount > 2) {
     if (online) {
-      return id === "hermes" ? "WSL Hermes Agent 已就绪" : "执行器已就绪";
+      return id === "hermes" ? "WSL Hermes Agent ready" : "Agent ready";
     }
-    return "未返回可读版本信息";
+    return "No readable version output.";
   }
 
   return singleLine.slice(0, 180);
 }
-
 async function checkAgents(config: SkillSpaceConfig): Promise<AgentHealth[]> {
   const ids = Object.keys(config.agents) as AgentId[];
   return Promise.all(ids.map((id) => checkAgent(id, config.agents[id])));
+}
+
+async function saveAgentConfig(config: SkillSpaceConfig, request: SaveAgentConfigRequest): Promise<BootstrapPayload> {
+  const allowed: AgentId[] = ["claude", "codex", "openclaw", "hermes"];
+  if (!allowed.includes(request.agentId)) {
+    throw new Error(`Unsupported agent: ${request.agentId}`);
+  }
+
+  const previous = config.agents[request.agentId] ?? fallbackConfig.agents[request.agentId];
+  const nextAgent: AgentConfig = {
+    ...previous,
+    ...request.config,
+    label: request.config.label.trim() || previous.label,
+    command: request.config.command?.trim() || previous.command,
+    args: (request.config.args ?? previous.args ?? []).map((arg) => arg.trim()).filter(Boolean),
+    cwd: request.config.cwd?.trim() || undefined,
+    env: request.config.env && Object.keys(request.config.env).length > 0 ? request.config.env : undefined
+  };
+
+  const nextConfig: SkillSpaceConfig = {
+    ...config,
+    agents: {
+      ...config.agents,
+      [request.agentId]: nextAgent
+    }
+  };
+  await writeConfig(nextConfig);
+  return bootstrap();
 }
 
 function parseFrontmatter(markdown: string): Record<string, string> {
@@ -408,6 +630,10 @@ function feishuConfigPath(config: SkillSpaceConfig): string {
 
 function feishuConversationPath(config: SkillSpaceConfig): string {
   return join(config.dataRoot, "config", "feishu.conversation.json");
+}
+
+function feishuDecisionLogPath(config: SkillSpaceConfig): string {
+  return join(config.dataRoot, "logs", "feishu.decisions.json");
 }
 
 function llmConfigPath(config: SkillSpaceConfig): string {
@@ -760,12 +986,95 @@ async function sendFeishuText(config: SkillSpaceConfig, text: string): Promise<b
   }
 }
 
+function stripInlineMarkdown(value: string): string {
+  return value
+    .replace(/\*\*(.*?)\*\*/g, "$1")
+    .replace(/__(.*?)__/g, "$1")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/!\[([^\]]*)\]\([^)]+\)/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/<br\s*\/?>/gi, " ")
+    .trim();
+}
+
+function markdownTableCells(line: string): string[] {
+  return line
+    .trim()
+    .replace(/^\|/, "")
+    .replace(/\|$/, "")
+    .split("|")
+    .map((cell) => stripInlineMarkdown(cell.trim()))
+    .filter((cell) => cell.length > 0);
+}
+
+function isMarkdownTableSeparator(line: string): boolean {
+  const cells = line
+    .trim()
+    .replace(/^\|/, "")
+    .replace(/\|$/, "")
+    .split("|")
+    .map((cell) => cell.trim());
+  return cells.length > 1 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
+}
+
+function markdownTableBlockToText(lines: string[]): string[] {
+  const separatorIndex = lines.findIndex(isMarkdownTableSeparator);
+  if (separatorIndex <= 0) {
+    return lines;
+  }
+
+  const headers = markdownTableCells(lines[separatorIndex - 1]);
+  const rows = lines.slice(separatorIndex + 1).map(markdownTableCells).filter((cells) => cells.length > 0);
+  if (headers.length === 0 || rows.length === 0) {
+    return lines;
+  }
+
+  return rows.map((cells) => {
+    if (headers.length === 2 && cells.length >= 2) {
+      return `- ${cells[0]}：${cells[1]}`;
+    }
+    const pairs = cells
+      .map((cell, index) => {
+        const header = headers[index] || `字段${index + 1}`;
+        return `${header}：${cell}`;
+      })
+      .join("；");
+    return `- ${pairs}`;
+  });
+}
+
+function formatFeishuOutboundMarkdown(markdown: string): string {
+  const lines = markdown.replace(/\r\n/g, "\n").split("\n");
+  const output: string[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    if (lines[index].includes("|") && index + 1 < lines.length && isMarkdownTableSeparator(lines[index + 1])) {
+      const tableLines = [lines[index], lines[index + 1]];
+      index += 2;
+      while (index < lines.length && lines[index].includes("|") && lines[index].trim()) {
+        tableLines.push(lines[index]);
+        index += 1;
+      }
+      output.push(...markdownTableBlockToText(tableLines));
+      index -= 1;
+      continue;
+    }
+    output.push(lines[index]);
+  }
+  return output.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function formatFeishuNoticeLine(line: string): string[] {
+  const lines = formatFeishuOutboundMarkdown(line).split("\n").filter(Boolean);
+  return lines.map((item, index) => (index === 0 ? `- ${item}` : `  ${item}`));
+}
+
 async function sendFeishuMarkdown(config: SkillSpaceConfig, markdown: string): Promise<boolean> {
   const stored = await readFeishuConfig(config);
   if (!stored?.enabled || !stored.receiveId) {
     return false;
   }
 
+  const outboundMarkdown = formatFeishuOutboundMarkdown(markdown);
   feishuDeliveryStatus = "sending";
   feishuDeliveryDetail = "正在发送飞书消息。";
   try {
@@ -773,13 +1082,13 @@ async function sendFeishuMarkdown(config: SkillSpaceConfig, markdown: string): P
       await ensureFeishuChannel(config);
     }
     if (feishuChannel?.send && feishuRuntimeState === "connected") {
-      await feishuChannel.send(stored.receiveId, { markdown });
+      await feishuChannel.send(stored.receiveId, { markdown: outboundMarkdown });
       feishuLastOutboundAt = new Date().toISOString();
       feishuDeliveryStatus = "sent";
       feishuDeliveryDetail = "飞书消息已发送。";
       return true;
     }
-    return sendFeishuText(config, markdown.replace(/\*\*/g, ""));
+    return sendFeishuText(config, stripInlineMarkdown(outboundMarkdown));
   } catch (error) {
     feishuRuntimeState = "error";
     feishuLastError = error instanceof Error ? error.message : String(error);
@@ -829,14 +1138,29 @@ function feishuStatusLabel(status: RunSummary["status"]): string {
   return labels[status] ?? status;
 }
 
+type FeishuReplyKind = "steward" | "task" | "system";
+
+function feishuReplyTitle(kind: FeishuReplyKind, title?: string): string {
+  const labels: Record<FeishuReplyKind, string> = {
+    steward: "管家回复",
+    task: "任务回复",
+    system: "系统通知"
+  };
+  return `**Skill-Space · ${labels[kind]}${title ? ` | ${title}` : ""}**`;
+}
+
+function wrapFeishuReply(text: string, kind: FeishuReplyKind, title?: string): string {
+  return [feishuReplyTitle(kind, title), "", `发送时间：${formatFeishuTime(new Date())}`, "", text].join("\n");
+}
+
 async function notifyFeishuRun(config: SkillSpaceConfig, title: string, lines: string[]): Promise<void> {
   const needsConfirmation =
     title.includes("\u786e\u8ba4") || title.toLowerCase().includes("confirm") || title.includes("\u9700\u8981");
   const message = [
-    `**Skill-Space | ${title}**`,
+    feishuReplyTitle("system", title),
     "",
     `\u53d1\u9001\u65f6\u95f4\uff1a${formatFeishuTime(new Date())}`,
-    ...lines.filter(Boolean).map((line) => `- ${line}`),
+    ...lines.filter(Boolean).flatMap(formatFeishuNoticeLine),
     "",
     needsConfirmation
       ? "\u8bf7\u76f4\u63a5\u56de\u590d\u9009\u9879\u7f16\u53f7\u6216\u786e\u8ba4\u5185\u5bb9\uff0c\u4f8b\u5982\uff1a1\u3001A\u3001\u7528\u65b9\u6848B\u3001\u786e\u8ba4\u53d1\u5e03\u3002"
@@ -903,11 +1227,13 @@ function extractFeishuMessageTarget(rawMessage: unknown, stored: FeishuStoredCon
 }
 
 async function findWaitingRun(config: SkillSpaceConfig): Promise<RunSummary | null> {
+  const waitingRuns = await listWaitingRuns(config);
+  return waitingRuns[0] ?? null;
+}
+
+async function listWaitingRuns(config: SkillSpaceConfig): Promise<RunSummary[]> {
   const runs = await listRuns(config);
-  return (
-    runs.find((run) => run.status === "waiting_input" && run.runtime === "claude" && Boolean(run.sessionId)) ??
-    null
-  );
+  return runs.filter((run) => run.status === "waiting_input" && run.runtime === "claude" && Boolean(run.sessionId));
 }
 
 function isLikelyWaitingRunReply(content: string): boolean {
@@ -932,8 +1258,53 @@ function isLikelyWaitingRunReply(content: string): boolean {
 }
 
 function summarizeWaitingRun(run: RunSummary): string {
-  const message = truncateForLog(run.lastMessage ?? "这个任务正在等待你的确认。", 1_200);
+  const message = formatFeishuOutboundMarkdown(truncateForLog(run.lastMessage ?? "这个任务正在等待你的确认。", 1_200));
   return [`任务：${run.skillName}`, `运行 ID：${run.runId}`, `等待事项：${message}`].join("\n");
+}
+
+function summarizeWaitingRuns(runs: RunSummary[]): string {
+  if (runs.length === 0) {
+    return "无";
+  }
+  return runs
+    .slice(0, 8)
+    .map((run, index) => {
+      const message = formatFeishuOutboundMarkdown(truncateForLog(run.lastMessage ?? "等待确认", 420))
+        .split("\n")
+        .slice(0, 8)
+        .join("\n  ");
+      return `${index + 1}. ${run.skillName}\n  运行 ID：${run.runId}\n  等待事项：${message}`;
+    })
+    .join("\n\n");
+}
+
+function pickWaitingRunReply(content: string, runs: RunSummary[]): { run: RunSummary; reply: string } | null {
+  const text = content.trim();
+  const match =
+    text.match(/^(?:任务|task|run)\s*([0-9]+|[a-f0-9-]{8,})\s*[:：,\s-]\s*(.+)$/i) ??
+    text.match(/^回复(?:任务)?\s*([0-9]+|[a-f0-9-]{8,})\s*[:：,\s-]\s*(.+)$/i);
+  if (!match) {
+    return null;
+  }
+  const token = match[1];
+  const reply = match[2]?.trim();
+  if (!reply) {
+    return null;
+  }
+  const run =
+    (/^\d+$/.test(token) ? runs[Number(token) - 1] : undefined) ??
+    runs.find((item) => item.runId.toLowerCase().startsWith(token.toLowerCase()));
+  return run ? { run, reply } : null;
+}
+
+function formatWaitingRunChoices(runs: RunSummary[]): string {
+  return [
+    "当前有多个任务正在等待确认，请先指定要回复哪个任务：",
+    "",
+    summarizeWaitingRuns(runs),
+    "",
+    "回复示例：任务1：A / 任务2：确认发布 / run 1234abcd: 选择方案B"
+  ].join("\n");
 }
 
 function normalizeForSearch(value: string): string {
@@ -1055,9 +1426,10 @@ async function answerFeishuChat(
   skills: SkillSummary[],
   runs: RunSummary[],
   conversation: LlmConversationMessage[],
-  waitingRun?: RunSummary | null
+  waitingRuns: RunSummary[] = []
 ): Promise<string> {
   const llmConfig = (await readLlmConfig(config)) ?? defaultLlmConfig();
+  const waitingRun = waitingRuns[0] ?? null;
   if (!llmConfig.enabled) {
     return fallbackFeishuChatReply(content, waitingRun);
   }
@@ -1072,11 +1444,12 @@ async function answerFeishuChat(
         "如果用户是在闲聊、问时间、问你是谁、问应用状态，请直接回答。",
         "只有当用户明确要求运行某个技能时，才建议使用 /skill run 或让应用调度技能。",
         "如果存在等待确认的任务，但用户消息不像明确选择或确认，不要把它当作任务回复；可以提醒用户当前等待事项。",
+        "如果有多个等待确认任务，提醒用户使用“任务1：...”这样的格式指定目标，不要替用户猜。",
         "",
         `当前时间：${new Date().toLocaleString("zh-CN", { hour12: false })}`,
         "",
         "等待确认任务：",
-        waitingRun ? summarizeWaitingRun(waitingRun) : "无",
+        summarizeWaitingRuns(waitingRuns),
         "",
         "最近运行：",
         JSON.stringify(
@@ -1126,6 +1499,46 @@ async function appendFeishuConversation(config: SkillSpaceConfig, role: LlmConve
   const messages = await readFeishuConversation(config);
   messages.push({ role, content: trimmed.slice(0, 2_000), at: new Date().toISOString() });
   await writeJsonFile(feishuConversationPath(config), messages.slice(-20));
+}
+
+async function listFeishuDecisionLogs(config: SkillSpaceConfig): Promise<FeishuDecisionLogEntry[]> {
+  const logs = await readJsonFile<FeishuDecisionLogEntry[]>(feishuDecisionLogPath(config));
+  return (logs ?? []).slice(0, 80);
+}
+
+async function appendFeishuDecisionLog(
+  config: SkillSpaceConfig,
+  entry: Omit<FeishuDecisionLogEntry, "id" | "at">
+): Promise<void> {
+  const logs = await listFeishuDecisionLogs(config);
+  const next: FeishuDecisionLogEntry = {
+    id: randomUUID(),
+    at: new Date().toISOString(),
+    ...entry,
+    message: truncateForLog(entry.message, 500),
+    replyPreview: entry.replyPreview ? truncateForLog(entry.replyPreview, 500) : undefined
+  };
+  await writeJsonFile(feishuDecisionLogPath(config), [next, ...logs].slice(0, 200));
+}
+
+function formatFeishuDecisionLogs(logs: FeishuDecisionLogEntry[]): string {
+  if (logs.length === 0) {
+    return "暂无飞书调度决策日志。";
+  }
+  return logs
+    .slice(0, 8)
+    .map((entry, index) => {
+      const detail = [
+        `${index + 1}. ${entry.action} · ${formatFeishuTime(new Date(entry.at))}`,
+        `原因：${entry.reason}`,
+        entry.skillId ? `技能：${entry.skillId}` : "",
+        entry.runId ? `运行 ID：${entry.runId}` : "",
+        typeof entry.confidence === "number" ? `置信度：${Math.round(entry.confidence * 100)}%` : "",
+        `消息：${entry.message}`
+      ].filter(Boolean);
+      return detail.join("\n");
+    })
+    .join("\n\n");
 }
 
 function formatConversationHistory(messages: LlmConversationMessage[]): string {
@@ -1199,32 +1612,32 @@ async function dispatchFeishuIntent(
   config: SkillSpaceConfig,
   content: string,
   intent: FeishuIntent,
-  sendReply: (text: string) => Promise<void>,
+  sendReply: (text: string, kind?: FeishuReplyKind, title?: string) => Promise<void>,
   conversation: LlmConversationMessage[] = [],
-  waitingRun?: RunSummary | null
+  waitingRuns: RunSummary[] = []
 ): Promise<void> {
   const skills = await scanSkills(config);
   const runs = await listRuns(config);
 
   if (intent.action === "help") {
-    await sendReply("可直接发送自然语言任务，例如：用公众号技能写一篇今日 AI 热点文章。也可使用 /skill list、/skill status、/skill run <技能ID> <输入>。任务等待确认时，直接回复 1、确认或补充内容即可。");
+    await sendReply("可直接发送自然语言任务，例如：用公众号技能写一篇今日 AI 热点文章。也可使用 /skill list、/skill status、/skill decisions、/skill run <技能ID> <输入>。任务等待确认时，直接回复 1、确认或补充内容即可。", "steward", "使用帮助");
     return;
   }
 
   if (intent.action === "list_skills") {
-    await sendReply(formatFeishuSkillList(skills));
+    await sendReply(formatFeishuSkillList(skills), "steward", "技能列表");
     return;
   }
 
   if (intent.action === "status") {
-    await sendReply(formatFeishuRunStatus(runs));
+    await sendReply(formatFeishuRunStatus(runs), "steward", "运行状态");
     return;
   }
 
   if (intent.action === "run_skill") {
     const skill = findSkillByText(skills, content, intent.skillId);
     if (!skill) {
-      await sendReply("我理解你想启动技能，但没有匹配到具体技能。请发送 /skill list 查看可用技能，或直接说出技能名称。");
+      await sendReply("我理解你想启动技能，但没有匹配到具体技能。请发送 /skill list 查看可用技能，或直接说出技能名称。", "steward", "未匹配技能");
       return;
     }
     const response = await runSkill(config, {
@@ -1232,11 +1645,11 @@ async function dispatchFeishuIntent(
       runtime: skill.defaultRuntime,
       input: intent.input?.trim() || content
     });
-    await sendReply(`已启动：${skill.name}\n运行 ID：${response.runId}`);
+    await sendReply(`已启动：${skill.name}\n运行 ID：${response.runId}`, "system", "已启动任务");
     return;
   }
 
-  await sendReply(await answerFeishuChat(config, content, skills, runs, conversation, waitingRun));
+  await sendReply(await answerFeishuChat(config, content, skills, runs, conversation, waitingRuns), "steward");
 }
 
 async function handleFeishuMessage(config: SkillSpaceConfig, rawMessage: unknown): Promise<void> {
@@ -1248,12 +1661,13 @@ async function handleFeishuMessage(config: SkillSpaceConfig, rawMessage: unknown
     return;
   }
 
-  const sendReply = async (text: string): Promise<void> => {
+  const sendReply = async (text: string, kind: FeishuReplyKind = "steward", title?: string): Promise<void> => {
+    const outbound = wrapFeishuReply(text, kind, title);
     if (feishuChannel?.send) {
       feishuDeliveryStatus = "sending";
       feishuDeliveryDetail = "正在发送飞书回复。";
       try {
-        await feishuChannel.send(target, { text });
+        await feishuChannel.send(target, { markdown: formatFeishuOutboundMarkdown(outbound) });
         feishuLastOutboundAt = new Date().toISOString();
         feishuDeliveryStatus = "sent";
         feishuDeliveryDetail = "飞书回复已发送。";
@@ -1266,7 +1680,7 @@ async function handleFeishuMessage(config: SkillSpaceConfig, rawMessage: unknown
         throw error;
       }
     }
-    await sendFeishuText(config, text);
+    await sendFeishuMarkdown(config, outbound);
     await appendFeishuConversation(config, "assistant", text);
   };
 
@@ -1276,18 +1690,56 @@ async function handleFeishuMessage(config: SkillSpaceConfig, rawMessage: unknown
   await appendFeishuConversation(config, "user", content);
 
   if (!content.startsWith("/skill")) {
-    const waitingRun = await findWaitingRun(config);
-    if (waitingRun && isLikelyWaitingRunReply(content)) {
+    const waitingRuns = await listWaitingRuns(config);
+    const pickedWaitingReply = pickWaitingRunReply(content, waitingRuns);
+    if (pickedWaitingReply && isLikelyWaitingRunReply(pickedWaitingReply.reply)) {
+      try {
+        await continueRun(config, {
+          runId: pickedWaitingReply.run.runId,
+          input: pickedWaitingReply.reply
+        });
+        await appendFeishuDecisionLog(config, {
+          action: "waiting_reply",
+          reason: "用户明确指定了等待任务编号或运行 ID。",
+          message: content,
+          runId: pickedWaitingReply.run.runId,
+          replyPreview: pickedWaitingReply.reply
+        });
+        await sendReply(`已把「${pickedWaitingReply.reply}」发送到任务：${pickedWaitingReply.run.skillName}`, "task", "已转发确认");
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        feishuLastError = message;
+        await sendReply(`收到「${pickedWaitingReply.reply}」，但转发到任务失败：${message}`, "task", "转发失败");
+      }
+      return;
+    }
+    if (waitingRuns.length > 1 && isLikelyWaitingRunReply(content)) {
+      await appendFeishuDecisionLog(config, {
+        action: "waiting_ambiguous",
+        reason: "用户回复像确认选项，但当前有多个等待任务，无法安全判断目标。",
+        message: content
+      });
+      await sendReply(formatWaitingRunChoices(waitingRuns), "system", "请选择任务");
+      return;
+    }
+    if (waitingRuns.length === 1 && isLikelyWaitingRunReply(content)) {
+      const [waitingRun] = waitingRuns;
       try {
         await continueRun(config, {
           runId: waitingRun.runId,
           input: content
         });
-        await sendReply(`\u5df2\u628a\u300c${content}\u300d\u53d1\u9001\u5230\u4efb\u52a1\uff1a${waitingRun.skillName}`);
+        await appendFeishuDecisionLog(config, {
+          action: "waiting_reply",
+          reason: "只有一个等待任务，且用户消息像明确确认或选项。",
+          message: content,
+          runId: waitingRun.runId
+        });
+        await sendReply(`已把「${content}」发送到任务：${waitingRun.skillName}`, "task", "已转发确认");
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         feishuLastError = message;
-        await sendReply(`\u6536\u5230\u300c${content}\u300d\uff0c\u4f46\u8f6c\u53d1\u5230\u4efb\u52a1\u5931\u8d25\uff1a${message}`);
+        await sendReply(`收到「${content}」，但转发到任务失败：${message}`, "task", "转发失败");
       }
       return;
     }
@@ -1296,38 +1748,51 @@ async function handleFeishuMessage(config: SkillSpaceConfig, rawMessage: unknown
     const runs = await listRuns(config);
     const conversation = await readFeishuConversation(config);
     const intent = await classifyFeishuIntent(config, content, skills, runs, conversation);
-    await dispatchFeishuIntent(config, content, intent, sendReply, conversation, waitingRun);
+    await appendFeishuDecisionLog(config, {
+      action: intent.action,
+      reason: intent.confidence ? "LLM 或本地规则完成意图分类。" : "使用本地默认分类。",
+      message: content,
+      skillId: intent.skillId,
+      confidence: intent.confidence,
+      replyPreview: intent.reply
+    });
+    await dispatchFeishuIntent(config, content, intent, sendReply, conversation, waitingRuns);
     return;
   }
 
   const [, command = "help", ...rest] = content.split(/\s+/);
   if (command === "help") {
-    await sendReply("可用指令：/skill list、/skill run <技能ID或名称> <输入>、/skill status。任务等待确认时，直接回复 1、2、3 等即可。");
+    await sendReply("可用指令：/skill list、/skill run <技能ID或名称> <输入>、/skill status、/skill decisions。任务等待确认时，直接回复 1、2、3 等即可；多个等待任务时请回复“任务1：确认内容”。", "steward", "使用帮助");
     return;
   }
 
   if (command === "list") {
     const skills = await scanSkills(config);
-    await sendReply(formatFeishuSkillList(skills));
+    await sendReply(formatFeishuSkillList(skills), "steward", "技能列表");
     return;
   }
 
   if (command === "status") {
     const runs = await listRuns(config);
-    await sendReply(formatFeishuRunStatus(runs));
+    await sendReply(formatFeishuRunStatus(runs), "steward", "运行状态");
+    return;
+  }
+
+  if (command === "decisions" || command === "decision-log") {
+    await sendReply(formatFeishuDecisionLogs(await listFeishuDecisionLogs(config)), "steward", "决策日志");
     return;
   }
 
   if (command === "run") {
     const [skillToken, ...inputParts] = rest;
     if (!skillToken) {
-      await sendReply("请使用：/skill run <技能ID或名称> <输入>");
+      await sendReply("请使用：/skill run <技能ID或名称> <输入>", "steward", "缺少技能");
       return;
     }
     const skills = await scanSkills(config);
     const skill = findSkillByText(skills, skillToken, skillToken);
     if (!skill) {
-      await sendReply(`没有找到技能：${skillToken}`);
+      await sendReply(`没有找到技能：${skillToken}`, "steward", "未匹配技能");
       return;
     }
     const response = await runSkill(config, {
@@ -1335,7 +1800,14 @@ async function handleFeishuMessage(config: SkillSpaceConfig, rawMessage: unknown
       runtime: skill.defaultRuntime,
       input: inputParts.join(" ") || "来自飞书的远程执行请求。"
     });
-    await sendReply(`已启动：${skill.name}\n运行 ID：${response.runId}`);
+    await appendFeishuDecisionLog(config, {
+      action: "command_run",
+      reason: "用户使用 /skill run 命令启动技能。",
+      message: content,
+      skillId: skill.id,
+      runId: response.runId
+    });
+    await sendReply(`已启动：${skill.name}\n运行 ID：${response.runId}`, "system", "已启动任务");
   }
 }
 
@@ -1450,9 +1922,7 @@ async function listRuns(config: SkillSpaceConfig): Promise<RunSummary[]> {
 async function deleteRun(config: SkillSpaceConfig, runId: string): Promise<{ deleted: boolean }> {
   const runSummary = await readJsonFile<RunSummary>(runSummaryPath(config, runId));
   const targetRoot = runSummary?.runRoot ?? join(config.runsRoot, runId);
-  const resolvedRunsRoot = `${resolve(config.runsRoot).toLowerCase()}\\`;
-  const resolvedTarget = resolve(targetRoot).toLowerCase();
-  if (!resolvedTarget.startsWith(resolvedRunsRoot) || resolvedTarget === resolve(config.runsRoot).toLowerCase()) {
+  if (!isPathInside(config.runsRoot, targetRoot)) {
     throw new Error("Refusing to delete a path outside the runs directory.");
   }
 
@@ -1593,6 +2063,9 @@ async function getRunEvents(config: SkillSpaceConfig, runId: string): Promise<Ru
   if (!runSummary || !existsSync(runSummary.logPath)) {
     return [];
   }
+  if (!isPathInside(config.runsRoot, runSummary.runRoot) || !isPathInside(runSummary.runRoot, runSummary.logPath)) {
+    return [];
+  }
 
   const lines = (await readFile(runSummary.logPath, "utf8")).split(/\r?\n/).filter(Boolean);
   const events = lines
@@ -1634,9 +2107,7 @@ async function listRunArtifacts(config: SkillSpaceConfig, runId: string): Promis
     return [];
   }
 
-  const resolvedRunsRoot = `${resolve(config.runsRoot).toLowerCase()}\\`;
-  const resolvedRunRoot = resolve(runSummary.runRoot).toLowerCase();
-  if (!resolvedRunRoot.startsWith(resolvedRunsRoot)) {
+  if (!isPathInside(config.runsRoot, runSummary.runRoot)) {
     return [];
   }
 
@@ -1664,6 +2135,9 @@ async function openRunFolder(config: SkillSpaceConfig, runId: string): Promise<{
   const runSummary = await readJsonFile<RunSummary>(runSummaryPath(config, runId));
   if (!runSummary) {
     return { opened: false, message: "Run not found." };
+  }
+  if (!isPathInside(config.runsRoot, runSummary.runRoot)) {
+    return { opened: false, message: "Refusing to open a path outside the runs directory." };
   }
 
   const result = await shell.openPath(runSummary.runRoot);
@@ -2010,12 +2484,8 @@ async function deleteSkill(config: SkillSpaceConfig, skillId: string): Promise<{
     return { deleted: false };
   }
 
-  const target = resolve(skill.root).toLowerCase();
-  const allowed = config.skillRoots.some((root) => {
-    const resolvedRoot = `${resolve(root).toLowerCase()}\\`;
-    return target.startsWith(resolvedRoot);
-  });
-  if (!allowed || config.skillRoots.some((root) => target === resolve(root).toLowerCase())) {
+  const allowed = config.skillRoots.some((root) => isPathInside(root, skill.root));
+  if (!allowed) {
     throw new Error("Refusing to delete a skill outside the Skill-Space skill roots.");
   }
 
@@ -2024,7 +2494,7 @@ async function deleteSkill(config: SkillSpaceConfig, skillId: string): Promise<{
 }
 
 function knownExternalSkillRoots(config: SkillSpaceConfig): string[] {
-  const home = process.env.USERPROFILE ?? "C:\\Users\\15119";
+  const home = process.env.USERPROFILE ?? process.env.HOME ?? defaultDataRoot();
   return Array.from(
     new Set([
       ...config.skillRoots,
@@ -2129,12 +2599,12 @@ async function findSkill(config: SkillSpaceConfig, skillId: string): Promise<Ski
   return skills.find((skill) => skill.id === skillId) ?? null;
 }
 
-function compilePrompt(skillMarkdown: string, input: string): string {
+function compilePrompt(config: SkillSpaceConfig, skillMarkdown: string, input: string): string {
   return [
     "You are running a Skill-Space universal skill.",
     "Follow the SKILL.md instructions exactly, but adapt to the user's current input and workspace.",
-    "Skill-Space local registry root is D:\\Skill-Space\\skills.",
-    "If this run creates a new reusable skill package, create it under D:\\Skill-Space\\skills\\<skill-name> with SKILL.md and .skillspace metadata so the desktop app can discover it automatically.",
+    `Skill-Space local registry root is ${config.skillRoots[0]}.`,
+    `If this run creates a new reusable skill package, create it under ${join(config.skillRoots[0], "<skill-name>")} with SKILL.md and .skillspace metadata so the desktop app can discover it automatically.`,
     "",
     "## SKILL.md",
     skillMarkdown,
@@ -2477,6 +2947,72 @@ async function summarizeSkill(config: SkillSpaceConfig, skillId: string): Promis
   return { skill: refreshed ?? { ...skill, description: summary }, summary };
 }
 
+function extractTaggedSection(value: string, tag: string): string | undefined {
+  const pattern = new RegExp(`<${tag}>\\s*([\\s\\S]*?)\\s*<\\/${tag}>`, "i");
+  return value.match(pattern)?.[1]?.trim();
+}
+
+function extractEditedSkillMarkdown(value: string): string | undefined {
+  const tagged = extractTaggedSection(value, "skill-md");
+  if (tagged) {
+    return tagged;
+  }
+  const fenced = value.match(/```(?:markdown|md)?\s*([\s\S]*?)```/i)?.[1]?.trim();
+  return fenced;
+}
+
+async function editSkillWithLlm(config: SkillSpaceConfig, request: EditSkillWithLlmRequest): Promise<EditSkillWithLlmResponse> {
+  const instruction = request.instruction.trim();
+  if (!instruction) {
+    throw new Error("请先输入要如何修改这个技能。");
+  }
+
+  const skill = await findSkill(config, request.skillId);
+  if (!skill) {
+    throw new Error(`Skill not found: ${request.skillId}`);
+  }
+
+  const skillPath = join(skill.root, "SKILL.md");
+  const markdown = (await readTextFile(skillPath)) ?? "";
+  const result = await callConfiguredLlm(
+    config,
+    [
+      skillSpaceStewardIdentity(),
+      "",
+      "你正在帮助用户修改一个 Skill-Space 技能包的 SKILL.md。",
+      "请根据用户要求直接产出修改后的完整 SKILL.md，不要修改技能目录中的其他文件。",
+      "除非用户明确要求，否则保留原来的 frontmatter、技能名称、执行边界和安全约束。",
+      "如果用户要求不清晰，请做保守、可逆、局部的改动。",
+      "",
+      "输出格式必须严格为：",
+      "<summary>用中文简短说明你改了什么</summary>",
+      "<skill-md>",
+      "完整的 SKILL.md 内容",
+      "</skill-md>",
+      "",
+      "用户修改要求：",
+      instruction,
+      "",
+      "当前 SKILL.md：",
+      markdown.slice(0, 40_000)
+    ].join("\n")
+  );
+
+  const nextMarkdown = extractEditedSkillMarkdown(result);
+  if (!nextMarkdown || nextMarkdown.length < 40) {
+    throw new Error("LLM 没有返回可写入的完整 SKILL.md。");
+  }
+
+  const summary = extractTaggedSection(result, "summary") ?? "已根据你的要求修改 SKILL.md。";
+  await writeFile(skillPath, `${nextMarkdown.trim()}\n`, "utf8");
+  await ensureSkillSpaceManifest(skill.root);
+  await scanSkills(config);
+  return {
+    skill: await getSkillDetail(config, request.skillId),
+    summary: summary.replace(/\s+/g, " ").slice(0, 500)
+  };
+}
+
 async function classifySkillTags(config: SkillSpaceConfig): Promise<ClassifySkillTagsResponse> {
   const skills = await scanSkills(config);
 
@@ -2776,7 +3312,7 @@ async function queryBackgroundSchedulerTask(): Promise<ScheduledTaskProbe | null
 async function installBackgroundSchedulerTask(config: SkillSpaceConfig): Promise<void> {
   await writeBackgroundSchedulerScript(config);
   const wrapperPath = backgroundSchedulerWrapperPath(config);
-  await runProcess(
+  const result = await runProcess(
     "schtasks.exe",
     [
       "/Create",
@@ -2792,16 +3328,24 @@ async function installBackgroundSchedulerTask(config: SkillSpaceConfig): Promise
     ],
     { timeoutMs: 12_000 }
   );
+  if (result.code !== 0) {
+    throw new Error(result.output || `schtasks create failed with code ${result.code}`);
+  }
 }
 
 async function getBackgroundSchedulerStatus(config: SkillSpaceConfig): Promise<BackgroundSchedulerStatus> {
+  const recentErrors = await readSchedulerErrors(config);
+  const latestError = recentErrors?.[0];
   if (process.platform !== "win32") {
     return {
       supported: false,
       enabled: false,
       taskName: backgroundTaskName,
       detail: "Windows Task Scheduler is only available on Windows.",
-      silent: false
+      silent: false,
+      lastErrorAt: latestError?.at,
+      lastError: latestError?.message,
+      recentErrors
     };
   }
 
@@ -2825,7 +3369,10 @@ async function getBackgroundSchedulerStatus(config: SkillSpaceConfig): Promise<B
     nextRunAt: probe?.nextRunAt,
     lastRunAt: probe?.lastRunAt,
     lastResult: probe?.lastResult,
-    silent: Boolean(probe?.action?.toLowerCase().includes("wscript.exe"))
+    silent: Boolean(probe?.action?.toLowerCase().includes("wscript.exe")),
+    lastErrorAt: latestError?.at,
+    lastError: latestError?.message,
+    recentErrors
   };
 }
 
@@ -2835,11 +3382,24 @@ async function setBackgroundScheduler(config: SkillSpaceConfig, enabled: boolean
   }
 
   if (!enabled) {
-    await runProcess("schtasks.exe", ["/Delete", "/TN", backgroundTaskName, "/F"], { timeoutMs: 8_000 });
+    const result = await runProcess("schtasks.exe", ["/Delete", "/TN", backgroundTaskName, "/F"], { timeoutMs: 8_000 });
+    if (result.code !== 0) {
+      await appendSchedulerError(config, {
+        phase: "disable",
+        message: result.output || `schtasks delete failed with code ${result.code}`
+      });
+    }
     return getBackgroundSchedulerStatus(config);
   }
 
-  await installBackgroundSchedulerTask(config);
+  try {
+    await installBackgroundSchedulerTask(config);
+  } catch (error) {
+    await appendSchedulerError(config, {
+      phase: "enable",
+      message: error instanceof Error ? error.message : String(error)
+    });
+  }
   return getBackgroundSchedulerStatus(config);
 }
 
@@ -2883,6 +3443,7 @@ async function executeRun(
   try {
     child = spawn(command, args, {
       cwd: options.cwd,
+      env: config.agents[options.runtime].env ? { ...process.env, ...config.agents[options.runtime].env } : process.env,
       windowsHide: true,
       shell: shouldUseShell(command)
     });
@@ -3050,7 +3611,7 @@ async function runSkill(config: SkillSpaceConfig, request: RunSkillRequest): Pro
   await mkdir(runRoot, { recursive: true });
 
   const skillMarkdown = await readFile(join(skill.root, "SKILL.md"), "utf8");
-  const prompt = compilePrompt(skillMarkdown, request.input);
+  const prompt = compilePrompt(config, skillMarkdown, request.input);
   let args = prepareAgentArgs(agent, request.runtime, prompt);
   let command = windowsCommand(agent.command);
   const startedAt = new Date().toISOString();
@@ -3102,6 +3663,9 @@ async function continueRun(config: SkillSpaceConfig, request: ContinueRunRequest
   const runSummary = await readJsonFile<RunSummary>(runSummaryPath(config, request.runId));
   if (!runSummary) {
     throw new Error(`Run not found: ${request.runId}`);
+  }
+  if (!isPathInside(config.runsRoot, runSummary.runRoot)) {
+    throw new Error("Refusing to continue a run outside the runs directory.");
   }
 
   if (runSummary.runtime !== "claude") {
@@ -3189,7 +3753,14 @@ async function runDueSchedules(config: SkillSpaceConfig): Promise<number> {
       });
       started += 1;
       schedules[index] = { ...nextTask, lastRunId: response.runId };
-    } catch {
+    } catch (error) {
+      await appendSchedulerError(config, {
+        phase: "run-due-schedule",
+        message: error instanceof Error ? error.message : String(error),
+        taskId: task.id,
+        taskName: task.name,
+        skillId: task.skillId
+      });
       schedules[index] = nextTask;
     }
   }
@@ -3207,9 +3778,22 @@ function startScheduler(): void {
   }
 
   schedulerTimer = setInterval(() => {
-    void ensureConfig().then((config) => runDueSchedules(config));
+    void ensureConfig()
+      .then((config) => runDueSchedules(config).catch((error) =>
+        appendSchedulerError(config, {
+          phase: "scheduler-loop",
+          message: error instanceof Error ? error.message : String(error)
+        })
+      ));
   }, 30_000);
-  void ensureConfig().then((config) => runDueSchedules(config));
+  void ensureConfig().then((config) =>
+    runDueSchedules(config).catch((error) =>
+      appendSchedulerError(config, {
+        phase: "scheduler-start",
+        message: error instanceof Error ? error.message : String(error)
+      })
+    )
+  );
 }
 
 function setUpdateStatus(next: Partial<UpdateStatus>): UpdateStatus {
@@ -3352,6 +3936,41 @@ async function installUpdate(): Promise<void> {
   autoUpdater.quitAndInstall(false, true);
 }
 
+function showMainWindow(): void {
+  if (!mainWindow) {
+    createWindow();
+    return;
+  }
+  mainWindow.setSkipTaskbar(false);
+  mainWindow.show();
+  if (mainWindow.isMinimized()) {
+    mainWindow.restore();
+  }
+  mainWindow.focus();
+}
+
+function ensureTray(): void {
+  if (tray) {
+    return;
+  }
+  tray = new Tray(appIconPath);
+  tray.setToolTip("Skill-Space");
+  tray.setContextMenu(
+    Menu.buildFromTemplate([
+      { label: "打开 Skill-Space", click: () => showMainWindow() },
+      { type: "separator" },
+      {
+        label: "退出",
+        click: () => {
+          isQuitting = true;
+          app.quit();
+        }
+      }
+    ])
+  );
+  tray.on("double-click", () => showMainWindow());
+}
+
 async function bootstrap(): Promise<BootstrapPayload> {
   const config = await ensureConfig();
   void ensureFeishuChannel(config);
@@ -3390,6 +4009,19 @@ function createWindow(): void {
   } else {
     void mainWindow.loadFile(join(__dirname, "../renderer/index.html"));
   }
+
+  mainWindow.on("close", (event) => {
+    if (!isQuitting && closeToTrayEnabled) {
+      event.preventDefault();
+      ensureTray();
+      mainWindow?.setSkipTaskbar(true);
+      mainWindow?.hide();
+    }
+  });
+
+  mainWindow.on("closed", () => {
+    mainWindow = null;
+  });
 }
 
 app.whenReady().then(() => {
@@ -3398,18 +4030,47 @@ app.whenReady().then(() => {
 
   if (process.argv.includes("--background-scheduler")) {
     void ensureConfig()
-      .then((config) => runDueSchedules(config))
+      .then((config) =>
+        runDueSchedules(config).catch(async (error) => {
+          await appendSchedulerError(config, {
+            phase: "background-scheduler",
+            message: error instanceof Error ? error.message : String(error)
+          });
+          return 0;
+        })
+      )
       .then((started) => {
         setTimeout(() => app.quit(), started > 0 ? 30 * 60_000 : 5_000);
       })
-      .catch(() => {
+      .catch(async (error) => {
+        const config = await ensureConfig().catch(() => null);
+        if (config) {
+          await appendSchedulerError(config, {
+            phase: "background-scheduler-bootstrap",
+            message: error instanceof Error ? error.message : String(error)
+          });
+        }
         setTimeout(() => app.quit(), 5_000);
       });
     return;
   }
 
+  void ensureConfig().then((config) => {
+    closeToTrayEnabled = Boolean(config.window.closeToTray);
+    if (closeToTrayEnabled) {
+      ensureTray();
+    }
+  });
+
   ipcMain.handle("skillspace:bootstrap", () => bootstrap());
   ipcMain.handle("skillspace:agents", async () => checkAgents(await ensureConfig()));
+  ipcMain.handle("skillspace:agent-save", async (_, request: SaveAgentConfigRequest) =>
+    saveAgentConfig(await ensureConfig(), request)
+  );
+  ipcMain.handle("skillspace:storage-choose", () => chooseStorageRoot());
+  ipcMain.handle("skillspace:storage-save", async (_, request: SaveStorageRootRequest) =>
+    saveStorageRoot(await ensureConfig(), request)
+  );
   ipcMain.handle("skillspace:skills", async () => scanSkills(await ensureConfig()));
   ipcMain.handle("skillspace:discover-skills", async () => discoverSkills(await ensureConfig()));
   ipcMain.handle("skillspace:import-discovered-skill", async (_, root: string) =>
@@ -3437,6 +4098,9 @@ app.whenReady().then(() => {
   );
   ipcMain.handle("skillspace:summarize-skill", async (_, skillId: string) =>
     summarizeSkill(await ensureConfig(), skillId)
+  );
+  ipcMain.handle("skillspace:edit-skill-with-llm", async (_, request: EditSkillWithLlmRequest) =>
+    editSkillWithLlm(await ensureConfig(), request)
   );
   ipcMain.handle("skillspace:classify-skill-tags", async () =>
     classifySkillTags(await ensureConfig())
@@ -3479,6 +4143,7 @@ app.whenReady().then(() => {
   ipcMain.handle("skillspace:feishu-test", async (_, message?: string) =>
     sendFeishuTest(await ensureConfig(), message)
   );
+  ipcMain.handle("skillspace:feishu-decisions", async () => listFeishuDecisionLogs(await ensureConfig()));
   ipcMain.handle("skillspace:llm-status", async () => getLlmStatus(await ensureConfig()));
   ipcMain.handle("skillspace:llm-save", async (_, request: SaveLlmConfigRequest) =>
     saveLlmConfig(await ensureConfig(), request)
@@ -3490,6 +4155,9 @@ app.whenReady().then(() => {
   ipcMain.handle("skillspace:update-check", () => checkForUpdates());
   ipcMain.handle("skillspace:update-download", () => downloadUpdate());
   ipcMain.handle("skillspace:update-install", () => installUpdate());
+  ipcMain.handle("skillspace:set-close-to-tray", async (_, enabled: boolean) =>
+    setCloseToTray(await ensureConfig(), enabled)
+  );
   ipcMain.handle("window:minimize", (event) => {
     const window = BrowserWindow.fromWebContents(event.sender) ?? mainWindow;
     window?.setSkipTaskbar(false);
@@ -3519,6 +4187,10 @@ app.whenReady().then(() => {
       createWindow();
     }
   });
+});
+
+app.on("before-quit", () => {
+  isQuitting = true;
 });
 
 app.on("window-all-closed", () => {
