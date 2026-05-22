@@ -1,4 +1,4 @@
-import type { BootstrapPayload, RunSummary, SkillDetail, SkillSpaceApi } from "../../shared/types";
+import type { BootstrapPayload, RunSummary, SkillDetail, SkillSpaceApi, SkillTemplateListing } from "../../shared/types";
 
 const now = new Date().toISOString();
 
@@ -116,6 +116,43 @@ const mockPayload: BootstrapPayload = {
   schedules: []
 };
 
+let mockMarketplaceTemplates: SkillTemplateListing[] = [
+  {
+    id: "wechat-daily-article",
+    name: "公众号每日文章自动化",
+    description: "从选题、深度文章生成、封面插图到同步草稿的公众号工作流模板。",
+    version: "1.0.0",
+    author: "Skill-Space",
+    category: "公众号",
+    downloads: 126,
+    rating: 4.8,
+    runtimes: ["claude", "codex", "hermes", "openclaw"],
+    safetyStatus: "ready",
+    updatedAt: now,
+    requiredVariables: [
+      { key: "brand_name", label: "品牌或公众号名", kind: "text", placeholder: "{{text.brand_name}}", example: "北陌大叔" },
+      { key: "draft_folder", label: "草稿目录", kind: "path", placeholder: "{{path.draft_folder}}", example: "D:\\work\\drafts" }
+    ]
+  },
+  {
+    id: "ai-daily-report",
+    name: "每日 AI 日报",
+    description: "抓取 AI 动态、生成摘要并发布到指定目录或服务器。",
+    version: "1.0.0",
+    author: "Skill-Space",
+    category: "研究",
+    downloads: 88,
+    rating: 4.7,
+    runtimes: ["claude", "codex"],
+    safetyStatus: "ready",
+    updatedAt: now,
+    requiredVariables: [
+      { key: "site_domain", label: "站点域名", kind: "text", placeholder: "{{text.site_domain}}", example: "ailabing.cn" },
+      { key: "output_dir", label: "输出目录", kind: "path", placeholder: "{{path.output_dir}}", example: "D:\\reports\\ai" }
+    ]
+  }
+];
+
 const mockDetails: Record<string, SkillDetail> = Object.fromEntries(
   mockPayload.skills.map((skill) => [
     skill.id,
@@ -145,8 +182,31 @@ export function installMockApiWhenMissing(): void {
   window.skillSpace = {
     bootstrap: async () => mockPayload,
     refreshAgents: async () => mockPayload.agents,
+    detectAgentCandidates: async () =>
+      mockPayload.agents.map((agent) => ({
+        id: agent.id,
+        label: agent.label,
+        command: agent.command ?? agent.id,
+        installed: agent.status === "online",
+        detail: agent.detail,
+        alreadyConfigured: Boolean(mockPayload.config.agents[agent.id])
+      })),
     saveAgentConfig: async (request) => {
       mockPayload.config.agents[request.agentId] = request.config;
+      return mockPayload;
+    },
+    testAgentConfig: async (request) => ({
+      id: request.agentId,
+      label: request.config.label,
+      enabled: request.config.enabled,
+      status: request.config.command ? "online" : "offline",
+      detail: request.config.command ? "Mock agent command is available." : "Missing command.",
+      command: request.config.command,
+      checkedAt: now
+    }),
+    deleteAgentConfig: async (agentId) => {
+      delete mockPayload.config.agents[agentId];
+      mockPayload.agents = mockPayload.agents.filter((agent) => agent.id !== agentId);
       return mockPayload;
     },
     chooseStorageRoot: async () => "D:\\Skill-Space",
@@ -194,6 +254,83 @@ export function installMockApiWhenMissing(): void {
       };
     },
     classifySkillTags: async () => ({ skills: mockPayload.skills.map((skill) => ({ ...skill, tags: [skill.tags[0] ?? "general"] })) }),
+    prepareSkillPackage: async (skillId: string) => ({
+      prepared: true,
+      skill: mockPayload.skills.find((skill) => skill.id === skillId) ?? mockPayload.skills[0],
+      packageRoot: "D:\\Skill-Space\\publish\\mock-skill-package",
+      manifestPath: "D:\\Skill-Space\\publish\\mock-skill-package\\.skillspace\\publish.json",
+      variables: [],
+      warnings: [],
+      filesProcessed: 3,
+      filesCopied: 4
+    }),
+    publishSkillTemplate: async (skillId: string) => {
+      const skill = mockPayload.skills.find((item) => item.id === skillId) ?? mockPayload.skills[0];
+      const template = {
+        id: skill.id,
+        name: skill.name,
+        description: skill.description,
+        version: skill.version,
+        author: "Local",
+        category: skill.tags[0] ?? "SkillOps",
+        downloads: 0,
+        rating: 0,
+        runtimes: skill.runtimes,
+        requiredVariables: [],
+        safetyStatus: "ready" as const,
+        updatedAt: now,
+        source: "local" as const,
+        packageRoot: "D:\\Skill-Space\\publish\\mock-skill-package"
+      };
+      mockMarketplaceTemplates.unshift(template);
+      return {
+        published: true,
+        template,
+        packageRoot: template.packageRoot,
+        warnings: [],
+        message: `Mock published ${skill.name}.`
+      };
+    },
+    deleteMarketplaceTemplate: async (templateId: string) => {
+      const before = mockMarketplaceTemplates.length;
+      mockMarketplaceTemplates = mockMarketplaceTemplates.filter((template) => template.id !== templateId || template.source !== "local");
+      return {
+        deleted: mockMarketplaceTemplates.length < before,
+        message: mockMarketplaceTemplates.length < before ? "Mock template deleted." : "Mock template was not local."
+      };
+    },
+    shareMarketplaceTemplate: async (templateId: string) => ({
+      shared: true,
+      packageRoot: `D:\\Skill-Space\\marketplace\\share\\${templateId}`,
+      catalogPath: `D:\\Skill-Space\\marketplace\\share\\${templateId}\\catalog.json`,
+      message: `Mock share package generated for ${templateId}.`
+    }),
+    listMarketplaceTemplates: async () => mockMarketplaceTemplates,
+    refreshMarketplaceTemplates: async () => mockMarketplaceTemplates.map((template) => ({
+      ...template,
+      installed: mockPayload.skills.some((skill) => skill.id === template.id || skill.id === `${template.id}-installed`)
+    })),
+    installMarketplaceTemplate: async (request) => {
+      const template = mockMarketplaceTemplates.find((item) => item.id === request.templateId) ?? mockMarketplaceTemplates[0];
+      const skill = {
+        id: `${template.id}-installed`,
+        name: template.name,
+        description: template.description,
+        version: template.version,
+        defaultRuntime: template.runtimes[0] ?? "claude",
+        runtimes: template.runtimes,
+        root: `D:\\Skill-Space\\skills\\${template.id}-installed`,
+        tags: [template.category],
+        hasSkillSpaceMetadata: true,
+        updatedAt: now
+      };
+      mockPayload.skills = [skill, ...mockPayload.skills.filter((item) => item.id !== skill.id)];
+      return {
+        installed: true,
+        skill,
+        message: `Mock installed ${template.name}.`
+      };
+    },
     importSkill: async () => ({
       imported: false,
       message: "Mock preview does not import files."

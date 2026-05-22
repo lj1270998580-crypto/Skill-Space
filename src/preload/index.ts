@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type {
   AgentHealth,
+  AgentCandidate,
   BackgroundSchedulerStatus,
   BootstrapPayload,
   ClassifySkillTagsResponse,
@@ -14,6 +15,13 @@ import type {
   LlmAnalyzeRequest,
   LlmAnalyzeResponse,
   SaveLlmConfigRequest,
+  InstallTemplateRequest,
+  InstallTemplateResponse,
+  PrepareSkillPackageResponse,
+  PublishTemplateResponse,
+  DeleteTemplateResponse,
+  ShareTemplateResponse,
+  SkillTemplateListing,
   RunEvent,
   RunArtifact,
   SaveFeishuConfigRequest,
@@ -32,8 +40,12 @@ import type {
 const api: SkillSpaceApi = {
   bootstrap: () => ipcRenderer.invoke("skillspace:bootstrap") as Promise<BootstrapPayload>,
   refreshAgents: () => ipcRenderer.invoke("skillspace:agents") as Promise<AgentHealth[]>,
+  detectAgentCandidates: () => ipcRenderer.invoke("skillspace:agent-candidates") as Promise<AgentCandidate[]>,
   saveAgentConfig: (request: SaveAgentConfigRequest) =>
     ipcRenderer.invoke("skillspace:agent-save", request) as Promise<BootstrapPayload>,
+  testAgentConfig: (request: SaveAgentConfigRequest) =>
+    ipcRenderer.invoke("skillspace:agent-test", request) as Promise<AgentHealth>,
+  deleteAgentConfig: (agentId) => ipcRenderer.invoke("skillspace:agent-delete", agentId) as Promise<BootstrapPayload>,
   chooseStorageRoot: () => ipcRenderer.invoke("skillspace:storage-choose") as Promise<string | null>,
   saveStorageRoot: (request: SaveStorageRootRequest) =>
     ipcRenderer.invoke("skillspace:storage-save", request) as Promise<BootstrapPayload>,
@@ -59,6 +71,20 @@ const api: SkillSpaceApi = {
     ipcRenderer.invoke("skillspace:edit-skill-with-llm", request) as Promise<EditSkillWithLlmResponse>,
   classifySkillTags: () =>
     ipcRenderer.invoke("skillspace:classify-skill-tags") as Promise<ClassifySkillTagsResponse>,
+  prepareSkillPackage: (skillId: string) =>
+    ipcRenderer.invoke("skillspace:prepare-skill-package", skillId) as Promise<PrepareSkillPackageResponse>,
+  publishSkillTemplate: (skillId: string) =>
+    ipcRenderer.invoke("skillspace:publish-skill-template", skillId) as Promise<PublishTemplateResponse>,
+  deleteMarketplaceTemplate: (templateId: string) =>
+    ipcRenderer.invoke("skillspace:marketplace-delete", templateId) as Promise<DeleteTemplateResponse>,
+  shareMarketplaceTemplate: (templateId: string) =>
+    ipcRenderer.invoke("skillspace:marketplace-share", templateId) as Promise<ShareTemplateResponse>,
+  listMarketplaceTemplates: () =>
+    ipcRenderer.invoke("skillspace:marketplace-templates") as Promise<SkillTemplateListing[]>,
+  refreshMarketplaceTemplates: () =>
+    ipcRenderer.invoke("skillspace:marketplace-refresh") as Promise<SkillTemplateListing[]>,
+  installMarketplaceTemplate: (request: InstallTemplateRequest) =>
+    ipcRenderer.invoke("skillspace:marketplace-install", request) as Promise<InstallTemplateResponse>,
   importSkill: () => ipcRenderer.invoke("skillspace:import") as Promise<ImportSkillResponse>,
   runSkill: (request: RunSkillRequest) =>
     ipcRenderer.invoke("skillspace:run", request) as Promise<RunSkillResponse>,

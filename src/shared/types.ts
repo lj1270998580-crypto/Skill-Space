@@ -1,6 +1,6 @@
 export type Locale = "zh-CN" | "en-US";
 
-export type AgentId = "claude" | "codex" | "openclaw" | "hermes";
+export type AgentId = string;
 
 export interface LocaleConfig {
   default: Locale;
@@ -47,6 +47,16 @@ export interface AgentHealth {
   detail: string;
   command?: string;
   checkedAt: string;
+}
+
+export interface AgentCandidate {
+  id: AgentId;
+  label: string;
+  command: string;
+  args?: string[];
+  installed: boolean;
+  detail: string;
+  alreadyConfigured: boolean;
 }
 
 export interface SkillSummary {
@@ -205,6 +215,25 @@ export interface ClassifySkillTagsResponse {
   skills: SkillSummary[];
 }
 
+export interface PublishTemplateVariable {
+  key: string;
+  label: string;
+  kind: "path" | "secret" | "text";
+  placeholder: string;
+  example?: string;
+}
+
+export interface PrepareSkillPackageResponse {
+  prepared: boolean;
+  skill: SkillSummary;
+  packageRoot: string;
+  manifestPath: string;
+  variables: PublishTemplateVariable[];
+  warnings: string[];
+  filesProcessed: number;
+  filesCopied: number;
+}
+
 export interface CreateScheduleRequest {
   name: string;
   skillId: string;
@@ -220,6 +249,56 @@ export interface CreateScheduleRequest {
 export interface DiscoveredSkill extends SkillSummary {
   sourceRoot: string;
   installed: boolean;
+}
+
+export interface SkillTemplateListing {
+  id: string;
+  name: string;
+  description: string;
+  version: string;
+  author: string;
+  category: string;
+  downloads: number;
+  rating: number;
+  runtimes: AgentId[];
+  requiredVariables: PublishTemplateVariable[];
+  safetyStatus: "ready" | "review_required";
+  updatedAt: string;
+  source?: "official" | "local" | "remote";
+  packageRoot?: string;
+  templateMarkdown?: string;
+  installed?: boolean;
+}
+
+export interface InstallTemplateRequest {
+  templateId: string;
+  variables: Record<string, string>;
+}
+
+export interface InstallTemplateResponse {
+  installed: boolean;
+  skill?: SkillSummary;
+  message: string;
+}
+
+export interface PublishTemplateResponse {
+  published: boolean;
+  template?: SkillTemplateListing;
+  packageRoot?: string;
+  warnings: string[];
+  message: string;
+}
+
+export interface DeleteTemplateResponse {
+  deleted: boolean;
+  message: string;
+}
+
+export interface ShareTemplateResponse {
+  shared: boolean;
+  packageRoot?: string;
+  catalogPath?: string;
+  message: string;
 }
 
 export interface LlmAnalyzeRequest {
@@ -367,7 +446,10 @@ export interface FeishuDecisionLogEntry {
 export interface SkillSpaceApi {
   bootstrap(): Promise<BootstrapPayload>;
   refreshAgents(): Promise<AgentHealth[]>;
+  detectAgentCandidates(): Promise<AgentCandidate[]>;
   saveAgentConfig(request: SaveAgentConfigRequest): Promise<BootstrapPayload>;
+  testAgentConfig(request: SaveAgentConfigRequest): Promise<AgentHealth>;
+  deleteAgentConfig(agentId: AgentId): Promise<BootstrapPayload>;
   chooseStorageRoot(): Promise<string | null>;
   saveStorageRoot(request: SaveStorageRootRequest): Promise<BootstrapPayload>;
   scanSkills(): Promise<SkillSummary[]>;
@@ -384,6 +466,13 @@ export interface SkillSpaceApi {
   summarizeSkill(skillId: string): Promise<SummarizeSkillResponse>;
   editSkillWithLlm(request: EditSkillWithLlmRequest): Promise<EditSkillWithLlmResponse>;
   classifySkillTags(): Promise<ClassifySkillTagsResponse>;
+  prepareSkillPackage(skillId: string): Promise<PrepareSkillPackageResponse>;
+  publishSkillTemplate(skillId: string): Promise<PublishTemplateResponse>;
+  deleteMarketplaceTemplate(templateId: string): Promise<DeleteTemplateResponse>;
+  shareMarketplaceTemplate(templateId: string): Promise<ShareTemplateResponse>;
+  listMarketplaceTemplates(): Promise<SkillTemplateListing[]>;
+  refreshMarketplaceTemplates(): Promise<SkillTemplateListing[]>;
+  installMarketplaceTemplate(request: InstallTemplateRequest): Promise<InstallTemplateResponse>;
   importSkill(): Promise<ImportSkillResponse>;
   runSkill(request: RunSkillRequest): Promise<RunSkillResponse>;
   continueRun(request: ContinueRunRequest): Promise<ContinueRunResponse>;

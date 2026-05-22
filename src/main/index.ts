@@ -8,6 +8,7 @@ import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 
 import QRCode from "qrcode";
 import type {
   AgentConfig,
+  AgentCandidate,
   AgentHealth,
   AgentId,
   BackgroundSchedulerStatus,
@@ -16,16 +17,23 @@ import type {
   ContinueRunRequest,
   ContinueRunResponse,
   CreateScheduleRequest,
+  DeleteTemplateResponse,
   DiscoveredSkill,
   EditSkillWithLlmRequest,
   EditSkillWithLlmResponse,
   FeishuReceiveIdType,
   FeishuStatus,
   ImportSkillResponse,
+  InstallTemplateRequest,
+  InstallTemplateResponse,
   LlmAnalyzeRequest,
   LlmAnalyzeResponse,
   LlmManagerStatus,
   LlmProvider,
+  PrepareSkillPackageResponse,
+  PublishTemplateResponse,
+  PublishTemplateVariable,
+  ShareTemplateResponse,
   FeishuDecisionLogEntry,
   RunEvent,
   RunArtifact,
@@ -41,6 +49,7 @@ import type {
   SkillDetail,
   SkillFileEntry,
   SkillSpaceConfig,
+  SkillTemplateListing,
   SkillSummary,
   UpdateStatus
 } from "../shared/types";
@@ -48,6 +57,7 @@ import type {
 const nodeRequire = createRequire(import.meta.url);
 const { autoUpdater } = nodeRequire("electron-updater") as typeof import("electron-updater");
 const legacyConfigPath = "D:\\Skill-Space\\config\\skillspace.config.json";
+const marketplaceCatalogUrl = "https://ailabing.cn/downloads/skill-space/templates/catalog.json";
 
 function defaultDataRoot(): string {
   if (process.platform === "win32") {
@@ -133,6 +143,128 @@ type LlmConversationMessage = {
   at?: string;
 };
 
+const detectableAgentCandidates: Array<Omit<AgentCandidate, "installed" | "detail" | "alreadyConfigured">> = [
+  {
+    id: "claude",
+    label: "Claude Code",
+    command: "claude",
+    args: ["--bare", "-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "bypassPermissions"]
+  },
+  {
+    id: "codex",
+    label: "Codex",
+    command: "codex",
+    args: [
+      "--ask-for-approval",
+      "never",
+      "exec",
+      "--sandbox",
+      "danger-full-access",
+      "--skip-git-repo-check",
+      "--json",
+      "{{prompt}}"
+    ]
+  },
+  {
+    id: "openclaw",
+    label: "OpenClaw",
+    command: "openclaw",
+    args: ["agent", "--local", "--message", "{{prompt}}", "--json"]
+  },
+  {
+    id: "hermes",
+    label: "Hermes Agent",
+    command: "wsl",
+    args: ["-d", "Ubuntu", "--", "hermes", "-z", "{{prompt}}"]
+  },
+  {
+    id: "gemini-cli",
+    label: "Gemini CLI",
+    command: "gemini",
+    args: ["-p", "{{prompt}}"]
+  },
+  {
+    id: "qwen-code",
+    label: "Qwen Code",
+    command: "qwen",
+    args: ["-p", "{{prompt}}"]
+  },
+  {
+    id: "opencode",
+    label: "OpenCode",
+    command: "opencode",
+    args: ["run", "{{prompt}}"]
+  },
+  {
+    id: "aider",
+    label: "Aider",
+    command: "aider",
+    args: ["--message", "{{prompt}}"]
+  }
+];
+const builtInAgentIds = new Set<AgentId>(["claude", "codex", "openclaw", "hermes"]);
+const marketplaceTemplates: SkillTemplateListing[] = [
+  {
+    id: "wechat-daily-article",
+    name: "公众号每日文章自动化",
+    description: "从选题确认、深度文章生成到 md2wechat 草稿同步的通用发布模板。",
+    version: "1.0.0",
+    author: "Skill-Space",
+    category: "公众号",
+    downloads: 1280,
+    rating: 4.8,
+    runtimes: ["claude", "codex"],
+    requiredVariables: [
+      { key: "workspace_path", label: "工作目录", kind: "path", placeholder: "{{path.workspace_path}}", example: "D:\\work\\wechat" },
+      { key: "wechat_account", label: "公众号名称", kind: "text", placeholder: "{{text.wechat_account}}", example: "我的公众号" },
+      { key: "topic_scope", label: "选题范围", kind: "text", placeholder: "{{text.topic_scope}}", example: "AI热点、品牌增长、内容营销" },
+      { key: "writing_style", label: "写作风格", kind: "text", placeholder: "{{text.writing_style}}", example: "卡兹克风格，犀利但可读" },
+      { key: "publish_channel", label: "发布渠道", kind: "text", placeholder: "{{text.publish_channel}}", example: "微信公众号草稿" }
+    ],
+    safetyStatus: "ready",
+    source: "official",
+    updatedAt: "2026-05-22T00:00:00.000Z"
+  },
+  {
+    id: "ai-daily-report",
+    name: "每日 AI 日报",
+    description: "搜索 AI 动态、生成日报并输出可发布页面的模板化工作流。",
+    version: "1.0.0",
+    author: "Skill-Space",
+    category: "研究",
+    downloads: 842,
+    rating: 4.7,
+    runtimes: ["claude", "openclaw", "codex"],
+    requiredVariables: [
+      { key: "site_root", label: "网站目录", kind: "path", placeholder: "{{path.site_root}}", example: "D:\\site\\daily" },
+      { key: "topic_scope", label: "关注范围", kind: "text", placeholder: "{{text.topic_scope}}", example: "AI Agent, 模型更新, 工具生态" },
+      { key: "report_audience", label: "读者对象", kind: "text", placeholder: "{{text.report_audience}}", example: "独立开发者和AI产品负责人" },
+      { key: "publish_format", label: "输出格式", kind: "text", placeholder: "{{text.publish_format}}", example: "Markdown + 首页HTML摘要" }
+    ],
+    safetyStatus: "ready",
+    source: "official",
+    updatedAt: "2026-05-22T00:00:00.000Z"
+  },
+  {
+    id: "automation-audit",
+    name: "自动化任务审计",
+    description: "扫描本地自动化、运行历史和重复任务，输出可执行的清理建议。",
+    version: "0.2.0",
+    author: "Skill-Space",
+    category: "运维",
+    downloads: 516,
+    rating: 4.6,
+    runtimes: ["codex", "claude"],
+    requiredVariables: [
+      { key: "audit_root", label: "审计目录", kind: "path", placeholder: "{{path.audit_root}}", example: "D:\\Skill-Space" },
+      { key: "audit_goal", label: "审计目标", kind: "text", placeholder: "{{text.audit_goal}}", example: "找出失败率高、重复或长期未运行的自动化" }
+    ],
+    safetyStatus: "review_required",
+    source: "official",
+    updatedAt: "2026-05-22T00:00:00.000Z"
+  }
+];
+
 const fallbackConfig: SkillSpaceConfig = {
   schemaVersion: "skillspace.config.v1",
   dataRoot: defaultDataRoot(),
@@ -200,6 +332,8 @@ async function ensureDataDirs(config: SkillSpaceConfig): Promise<void> {
     mkdir(config.logsRoot, { recursive: true }),
     mkdir(config.artifactsRoot, { recursive: true }),
     mkdir(scheduleRoot(config), { recursive: true }),
+    mkdir(publishRoot(config), { recursive: true }),
+    mkdir(marketplaceRoot(config), { recursive: true }),
     mkdir(dirname(config.registry.path), { recursive: true }),
     ...config.skillRoots.map((root) => mkdir(root, { recursive: true }))
   ]);
@@ -215,6 +349,22 @@ function schedulesPath(config: SkillSpaceConfig): string {
 
 function skillChangesPath(config: SkillSpaceConfig): string {
   return join(dirname(config.registry.path), "skill-changes.json");
+}
+
+function publishRoot(config: SkillSpaceConfig): string {
+  return join(config.dataRoot, "publish");
+}
+
+function marketplaceRoot(config: SkillSpaceConfig): string {
+  return join(config.dataRoot, "marketplace");
+}
+
+function marketplaceCatalogPath(config: SkillSpaceConfig): string {
+  return join(marketplaceRoot(config), "catalog.json");
+}
+
+function marketplaceShareRoot(config: SkillSpaceConfig): string {
+  return join(marketplaceRoot(config), "share");
 }
 
 function backgroundSchedulerScriptPath(config: SkillSpaceConfig): string {
@@ -531,22 +681,51 @@ async function checkAgents(config: SkillSpaceConfig): Promise<AgentHealth[]> {
   return Promise.all(ids.map((id) => checkAgent(id, config.agents[id])));
 }
 
+async function detectAgentCandidates(config: SkillSpaceConfig): Promise<AgentCandidate[]> {
+  return Promise.all(
+    detectableAgentCandidates.map(async (candidate) => {
+      const probe = healthProbe(candidate.id, {
+        enabled: true,
+        label: candidate.label,
+        command: candidate.command,
+        args: candidate.args
+      });
+      const result = probe.command
+        ? await runProcess(probe.command, probe.args, { timeoutMs: 8_000 })
+        : { code: 1, output: "Missing command." };
+      const installed = result.code === 0;
+      return {
+        ...candidate,
+        installed,
+        detail: installed ? normalizeAgentDetail(candidate.id, result.output, true) : "未检测到本机命令",
+        alreadyConfigured: Boolean(config.agents[candidate.id])
+      };
+    })
+  );
+}
+
+function normalizeAgentConfig(agentId: AgentId, previous: AgentConfig, next: AgentConfig): AgentConfig {
+  return {
+    ...previous,
+    ...next,
+    label: next.label.trim() || previous.label || agentId,
+    command: next.command?.trim() || previous.command,
+    args: (next.args ?? previous.args ?? []).map((arg) => arg.trim()).filter(Boolean),
+    cwd: next.cwd?.trim() || undefined,
+    env: next.env && Object.keys(next.env).length > 0 ? next.env : undefined
+  };
+}
+
 async function saveAgentConfig(config: SkillSpaceConfig, request: SaveAgentConfigRequest): Promise<BootstrapPayload> {
-  const allowed: AgentId[] = ["claude", "codex", "openclaw", "hermes"];
-  if (!allowed.includes(request.agentId)) {
-    throw new Error(`Unsupported agent: ${request.agentId}`);
+  if (!/^[a-z0-9][a-z0-9_-]{1,47}$/i.test(request.agentId)) {
+    throw new Error(`Invalid agent id: ${request.agentId}`);
   }
 
-  const previous = config.agents[request.agentId] ?? fallbackConfig.agents[request.agentId];
-  const nextAgent: AgentConfig = {
-    ...previous,
-    ...request.config,
-    label: request.config.label.trim() || previous.label,
-    command: request.config.command?.trim() || previous.command,
-    args: (request.config.args ?? previous.args ?? []).map((arg) => arg.trim()).filter(Boolean),
-    cwd: request.config.cwd?.trim() || undefined,
-    env: request.config.env && Object.keys(request.config.env).length > 0 ? request.config.env : undefined
+  const previous = config.agents[request.agentId] ?? fallbackConfig.agents[request.agentId] ?? {
+    enabled: true,
+    label: request.agentId
   };
+  const nextAgent = normalizeAgentConfig(request.agentId, previous, request.config);
 
   const nextConfig: SkillSpaceConfig = {
     ...config,
@@ -554,6 +733,29 @@ async function saveAgentConfig(config: SkillSpaceConfig, request: SaveAgentConfi
       ...config.agents,
       [request.agentId]: nextAgent
     }
+  };
+  await writeConfig(nextConfig);
+  return bootstrap();
+}
+
+async function testAgentConfig(config: SkillSpaceConfig, request: SaveAgentConfigRequest): Promise<AgentHealth> {
+  const previous = config.agents[request.agentId] ?? fallbackConfig.agents[request.agentId] ?? {
+    enabled: true,
+    label: request.agentId
+  };
+  return checkAgent(request.agentId, normalizeAgentConfig(request.agentId, previous, request.config));
+}
+
+async function deleteAgentConfig(config: SkillSpaceConfig, agentId: AgentId): Promise<BootstrapPayload> {
+  if (builtInAgentIds.has(agentId)) {
+    throw new Error("Built-in agents cannot be deleted.");
+  }
+  const nextAgents = { ...config.agents };
+  delete nextAgents[agentId];
+  const nextConfig: SkillSpaceConfig = {
+    ...config,
+    agents: nextAgents,
+    defaultRuntime: config.defaultRuntime === agentId ? "claude" : config.defaultRuntime
   };
   await writeConfig(nextConfig);
   return bootstrap();
@@ -1892,6 +2094,165 @@ async function listSkillFiles(root: string, current = root, entries: SkillFileEn
   return entries;
 }
 
+function isPublishTextFile(path: string, size?: number): boolean {
+  if ((size ?? 0) > 2_000_000) {
+    return false;
+  }
+  return /\.(md|txt|json|ya?ml|toml|js|ts|tsx|jsx|py|ps1|sh|bat|cmd|env|ini|xml|html|css)$/i.test(path);
+}
+
+function nextTemplateVariable(
+  variables: Map<string, PublishTemplateVariable>,
+  kind: PublishTemplateVariable["kind"],
+  example: string
+): PublishTemplateVariable {
+  const existing = [...variables.values()].find((item) => item.kind === kind && item.example === example);
+  if (existing) {
+    return existing;
+  }
+  const key = `${kind}_${[...variables.values()].filter((item) => item.kind === kind).length + 1}`;
+  const variable: PublishTemplateVariable = {
+    key,
+    label: kind === "path" ? "本地路径" : kind === "secret" ? "密钥或令牌" : "文本配置",
+    kind,
+    placeholder: `{{${kind}.${key}}}`,
+    example
+  };
+  variables.set(variable.placeholder, variable);
+  return variable;
+}
+
+function sanitizePublishText(
+  text: string,
+  config: SkillSpaceConfig,
+  variables: Map<string, PublishTemplateVariable>,
+  warnings: string[]
+): string {
+  let nextText = text;
+  const home = process.env.USERPROFILE ?? process.env.HOME;
+  const knownPaths = [home, config.dataRoot, ...config.skillRoots].filter((item): item is string => Boolean(item));
+  for (const knownPath of knownPaths.sort((a, b) => b.length - a.length)) {
+    const normalized = knownPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const variable = nextTemplateVariable(variables, "path", knownPath);
+    nextText = nextText.replace(new RegExp(normalized, "gi"), variable.placeholder);
+  }
+
+  nextText = nextText.replace(/[A-Za-z]:\\[^\s`"'<>|]+/g, (match) => {
+    const variable = nextTemplateVariable(variables, "path", match);
+    return variable.placeholder;
+  });
+  nextText = nextText.replace(/\/(?:Users|home)\/[^\s`"'<>|]+/g, (match) => {
+    const variable = nextTemplateVariable(variables, "path", match);
+    return variable.placeholder;
+  });
+  nextText = nextText.replace(/\b(?:sk-[A-Za-z0-9_-]{20,}|sk-proj-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{20,})\b/g, (match) => {
+    const variable = nextTemplateVariable(variables, "secret", `${match.slice(0, 6)}...`);
+    warnings.push(`已替换疑似密钥：${variable.placeholder}`);
+    return variable.placeholder;
+  });
+  nextText = nextText.replace(/\b(?:api[_-]?key|token|secret|password)\s*[:=]\s*["']?([A-Za-z0-9_./+=-]{12,})["']?/gi, (match) => {
+    const variable = nextTemplateVariable(variables, "secret", "configured-secret");
+    warnings.push(`已替换疑似敏感配置：${variable.placeholder}`);
+    return match.replace(/[:=]\s*["']?.*$/s, `= ${variable.placeholder}`);
+  });
+
+  return nextText;
+}
+
+function publishInputsSchema(variables: PublishTemplateVariable[]): Record<string, unknown> {
+  return {
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    title: "Skill 模板配置",
+    type: "object",
+    required: variables.map((item) => item.key),
+    properties: Object.fromEntries(
+      variables.map((item) => [
+        item.key,
+        {
+          type: "string",
+          title: item.label,
+          description: `用于替换 ${item.placeholder}`,
+          default: "",
+          examples: item.example ? [item.example] : undefined
+        }
+      ])
+    )
+  };
+}
+
+function inputSchemaVariables(schema: unknown): PublishTemplateVariable[] {
+  if (!schema || typeof schema !== "object") {
+    return [];
+  }
+  const schemaObject = schema as Record<string, unknown>;
+  const properties = schemaObject.properties;
+  if (!properties || typeof properties !== "object") {
+    return [];
+  }
+  const required = new Set(Array.isArray(schemaObject.required) ? schemaObject.required.map(String) : []);
+  return Object.entries(properties as Record<string, unknown>)
+    .filter(([key]) => required.has(key))
+    .map(([key, value]) => {
+      const field = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+      return {
+        key,
+        label: String(field.title ?? field.label ?? key),
+        kind: "text",
+        placeholder: `{{text.${key}}}`,
+        example: Array.isArray(field.examples) ? String(field.examples[0] ?? "") : String(field.default ?? "")
+      } satisfies PublishTemplateVariable;
+    });
+}
+
+function mergeTemplateVariables(variables: PublishTemplateVariable[]): PublishTemplateVariable[] {
+  const seen = new Set<string>();
+  return variables.filter((variable) => {
+    if (seen.has(variable.key)) {
+      return false;
+    }
+    seen.add(variable.key);
+    return true;
+  });
+}
+
+async function copyPublishTemplateFiles(
+  sourceRoot: string,
+  targetRoot: string,
+  config: SkillSpaceConfig,
+  variables: Map<string, PublishTemplateVariable>,
+  warnings: string[]
+): Promise<{ filesProcessed: number; filesCopied: number }> {
+  const files = await listSkillFiles(sourceRoot);
+  let filesProcessed = 0;
+  let filesCopied = 0;
+
+  for (const file of files) {
+    if (file.kind !== "file") {
+      continue;
+    }
+    if (file.path.startsWith(".git/") || file.path.includes("/node_modules/")) {
+      continue;
+    }
+    const sourcePath = join(sourceRoot, file.path);
+    const targetPath = join(targetRoot, file.path);
+    if (!isPathInside(sourceRoot, sourcePath, true) || !isPathInside(targetRoot, targetPath, true)) {
+      warnings.push(`已跳过不安全路径：${file.path}`);
+      continue;
+    }
+    await mkdir(dirname(targetPath), { recursive: true });
+    if (isPublishTextFile(file.path, file.size)) {
+      const text = await readFile(sourcePath, "utf8");
+      await writeFile(targetPath, sanitizePublishText(text, config, variables, warnings), "utf8");
+      filesProcessed += 1;
+    } else {
+      await cp(sourcePath, targetPath, { force: true });
+    }
+    filesCopied += 1;
+  }
+
+  return { filesProcessed, filesCopied };
+}
+
 function runSummaryPath(config: SkillSpaceConfig, runId: string): string {
   return join(config.runsRoot, runId, "run.json");
 }
@@ -2167,13 +2528,98 @@ async function getSkillDetail(config: SkillSpaceConfig, skillId: string): Promis
   };
 }
 
+async function prepareSkillPackage(config: SkillSpaceConfig, skillId: string): Promise<PrepareSkillPackageResponse> {
+  const skill = await findSkill(config, skillId);
+  if (!skill) {
+    throw new Error(`Skill not found: ${skillId}`);
+  }
+  if (!isPathInside(config.skillRoots[0], skill.root) && !config.skillRoots.some((root) => isPathInside(root, skill.root, true))) {
+    throw new Error("Refusing to publish a skill outside configured skill roots.");
+  }
+
+  const packageId = `${slugifySkillName(skill.name || skill.id)}-${skill.version.replace(/[^A-Za-z0-9_.-]/g, "_")}-${new Date()
+    .toISOString()
+    .replace(/[:.]/g, "-")}`;
+  const targetRoot = join(publishRoot(config), packageId);
+  await rm(targetRoot, { recursive: true, force: true });
+  await mkdir(targetRoot, { recursive: true });
+
+  const variables = new Map<string, PublishTemplateVariable>();
+  const warnings: string[] = [];
+  const copied = await copyPublishTemplateFiles(skill.root, targetRoot, config, variables, warnings);
+  const existingInputSchema = await readOptionalJson(join(targetRoot, ".skillspace", "inputs.schema.json"));
+  const variableList = mergeTemplateVariables([...variables.values(), ...inputSchemaVariables(existingInputSchema)]);
+  const metadataRoot = join(targetRoot, ".skillspace");
+  await mkdir(metadataRoot, { recursive: true });
+
+  const manifestPath = join(metadataRoot, "publish.json");
+  await writeJsonFile(manifestPath, {
+    schemaVersion: "skillspace.publish.v1",
+    packageId,
+    sourceSkillId: skill.id,
+    sourceSkillName: skill.name,
+    name: skill.name,
+    description: skill.description,
+    version: skill.version,
+    preparedAt: new Date().toISOString(),
+    template: {
+      variables: variableList,
+      inputSchema: ".skillspace/inputs.schema.json"
+    },
+    safety: {
+      status: warnings.length > 0 ? "review_required" : "ready",
+      warnings
+    },
+    install: {
+      entry: "SKILL.md",
+      requiresConfiguration: variableList.length > 0
+    }
+  });
+
+  const generatedInputSchema = publishInputsSchema(variableList);
+  const existingSchemaObject =
+    typeof existingInputSchema === "object" && existingInputSchema ? (existingInputSchema as Record<string, unknown>) : {};
+  await writeJsonFile(join(metadataRoot, "inputs.schema.json"), {
+    ...existingSchemaObject,
+    title: existingSchemaObject.title ?? generatedInputSchema.title,
+    type: "object",
+    required: Array.from(
+      new Set([
+        ...((Array.isArray(existingSchemaObject.required) ? existingSchemaObject.required : []) as string[]),
+        ...((generatedInputSchema.required as string[]) ?? [])
+      ])
+    ),
+    properties: {
+      ...((typeof existingSchemaObject.properties === "object" && existingSchemaObject.properties
+        ? existingSchemaObject.properties
+        : {}) as Record<string, unknown>),
+      ...((generatedInputSchema.properties as Record<string, unknown>) ?? {})
+    }
+  });
+  await writeJsonFile(join(metadataRoot, "README.publish.json"), {
+    note: "This package was prepared by Skill-Space as a reusable template. Review publish.json before uploading.",
+    packageRoot: targetRoot
+  });
+
+  return {
+    prepared: true,
+    skill: (await scanSkillFolder(skill.root)) ?? skill,
+    packageRoot: targetRoot,
+    manifestPath,
+    variables: variableList,
+    warnings,
+    filesProcessed: copied.filesProcessed,
+    filesCopied: copied.filesCopied
+  };
+}
+
 function runtimeList(value: unknown, fallback: AgentId[]): AgentId[] {
   if (!Array.isArray(value)) {
     return fallback;
   }
 
   const allowed: AgentId[] = ["claude", "codex", "openclaw", "hermes"];
-  const normalized = value.filter((item): item is AgentId => allowed.includes(item));
+  const normalized = value.filter((item): item is AgentId => typeof item === "string" && (allowed.includes(item) || /^[a-z0-9][a-z0-9_-]{1,47}$/i.test(item)));
   return normalized.length > 0 ? normalized : fallback;
 }
 
@@ -2432,6 +2878,369 @@ async function importSkill(config: SkillSpaceConfig): Promise<ImportSkillRespons
     imported: Boolean(skill),
     skill: skill ?? undefined,
     message: skill ? `Imported ${skill.name}.` : "Import completed, but no valid SKILL.md was found."
+  };
+}
+
+async function readLocalMarketplaceTemplates(config: SkillSpaceConfig): Promise<SkillTemplateListing[]> {
+  const parsed = await readOptionalJson(marketplaceCatalogPath(config));
+  if (!Array.isArray(parsed)) {
+    return [];
+  }
+
+  return parsed
+    .filter((item): item is SkillTemplateListing => Boolean(item && typeof item === "object" && "id" in item))
+    .map((item) => ({
+      ...item,
+      source: item.source ?? "local"
+    }));
+}
+
+async function writeLocalMarketplaceTemplates(config: SkillSpaceConfig, templates: SkillTemplateListing[]): Promise<void> {
+  await mkdir(marketplaceRoot(config), { recursive: true });
+  await writeJsonFile(marketplaceCatalogPath(config), templates);
+}
+
+async function migrateLocalMarketplaceTemplates(config: SkillSpaceConfig): Promise<SkillTemplateListing[]> {
+  const templates = await readLocalMarketplaceTemplates(config);
+  let changed = false;
+  const migrated: SkillTemplateListing[] = [];
+
+  for (const template of templates) {
+    if (
+      template.source === "local" &&
+      template.packageRoot &&
+      isPathInside(publishRoot(config), template.packageRoot, true) &&
+      existsSync(template.packageRoot)
+    ) {
+      const nextPackageRoot = join(marketplaceRoot(config), "packages", basename(template.packageRoot));
+      if (!existsSync(nextPackageRoot)) {
+        await mkdir(dirname(nextPackageRoot), { recursive: true });
+        await cp(template.packageRoot, nextPackageRoot, { recursive: true, force: true });
+      }
+      migrated.push({ ...template, packageRoot: nextPackageRoot });
+      changed = true;
+    } else {
+      migrated.push(template);
+    }
+  }
+
+  if (changed) {
+    await writeLocalMarketplaceTemplates(config, migrated);
+  }
+  return migrated;
+}
+
+async function fetchRemoteMarketplaceTemplates(): Promise<SkillTemplateListing[]> {
+  try {
+    const response = await fetch(marketplaceCatalogUrl, { cache: "no-store" });
+    if (!response.ok) {
+      return [];
+    }
+    const parsed = await response.json();
+    const templates: unknown[] = Array.isArray(parsed)
+      ? parsed
+      : parsed && typeof parsed === "object" && Array.isArray((parsed as Record<string, unknown>).templates)
+        ? ((parsed as Record<string, unknown>).templates as unknown[])
+        : [];
+    return templates
+      .filter((item: unknown): item is SkillTemplateListing => Boolean(item && typeof item === "object" && "id" in item))
+      .map((item) => ({
+        ...item,
+        source: "remote" as const
+      }));
+  } catch {
+    return [];
+  }
+}
+
+async function installedTemplateIds(config: SkillSpaceConfig): Promise<Set<string>> {
+  const ids = new Set<string>();
+  for (const skill of await scanSkills(config)) {
+    ids.add(skill.id);
+    const manifest = await readOptionalJson(join(skill.root, ".skillspace", "manifest.json"));
+    if (manifest && typeof manifest === "object") {
+      const marketplace = (manifest as Record<string, unknown>).marketplace;
+      if (marketplace && typeof marketplace === "object" && "templateId" in marketplace) {
+        ids.add(String((marketplace as Record<string, unknown>).templateId));
+      }
+    }
+  }
+  return ids;
+}
+
+async function listMarketplaceTemplates(config: SkillSpaceConfig, includeRemote = true): Promise<SkillTemplateListing[]> {
+  const localTemplates = await migrateLocalMarketplaceTemplates(config);
+  const remoteTemplates = includeRemote ? await fetchRemoteMarketplaceTemplates() : [];
+  const installedIds = await installedTemplateIds(config);
+  const seen = new Set<string>();
+  return [
+    ...localTemplates,
+    ...remoteTemplates,
+    ...marketplaceTemplates
+  ]
+    .filter((template) => {
+      if (seen.has(template.id)) {
+        return false;
+      }
+      seen.add(template.id);
+      return true;
+    })
+    .map((template) => ({
+      ...template,
+      installed: installedIds.has(template.id)
+    }))
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+}
+
+async function publishSkillTemplate(config: SkillSpaceConfig, skillId: string): Promise<PublishTemplateResponse> {
+  const prepared = await prepareSkillPackage(config, skillId);
+  const packageRoot = join(marketplaceRoot(config), "packages", basename(prepared.packageRoot));
+  await rm(packageRoot, { recursive: true, force: true });
+  await mkdir(dirname(packageRoot), { recursive: true });
+  await cp(prepared.packageRoot, packageRoot, { recursive: true, force: true });
+  const template: SkillTemplateListing = {
+    id: prepared.skill.id,
+    name: prepared.skill.name,
+    description: prepared.skill.description,
+    version: prepared.skill.version,
+    author: "Local",
+    category: prepared.skill.tags[0] ?? "SkillOps",
+    downloads: 0,
+    rating: 0,
+    runtimes: prepared.skill.runtimes,
+    requiredVariables: prepared.variables,
+    safetyStatus: prepared.warnings.length > 0 ? "review_required" : "ready",
+    updatedAt: new Date().toISOString(),
+    source: "local",
+    packageRoot
+  };
+  const localTemplates = await readLocalMarketplaceTemplates(config);
+  await writeLocalMarketplaceTemplates(config, [
+    template,
+    ...localTemplates.filter((item) => item.id !== template.id)
+  ]);
+
+  return {
+    published: true,
+    template,
+    packageRoot,
+    warnings: prepared.warnings,
+    message: `已加入本地工作流库：${template.name}`
+  };
+}
+
+async function deleteMarketplaceTemplate(config: SkillSpaceConfig, templateId: string): Promise<DeleteTemplateResponse> {
+  const localTemplates = await readLocalMarketplaceTemplates(config);
+  const template = localTemplates.find((item) => item.id === templateId);
+  if (!template) {
+    return { deleted: false, message: "这个模板不在本地工作流库中，在线或官方模板不能从本机删除。" };
+  }
+
+  if (template.packageRoot) {
+    const packageRoot = resolve(template.packageRoot);
+    if (isPathInside(marketplaceRoot(config), packageRoot, true) || isPathInside(publishRoot(config), packageRoot, true)) {
+      await rm(packageRoot, { recursive: true, force: true });
+    }
+  }
+
+  await writeLocalMarketplaceTemplates(
+    config,
+    localTemplates.filter((item) => item.id !== templateId)
+  );
+  return { deleted: true, message: `已从本地工作流库删除：${template.name}` };
+}
+
+async function shareMarketplaceTemplate(config: SkillSpaceConfig, templateId: string): Promise<ShareTemplateResponse> {
+  const template = (await listMarketplaceTemplates(config, false)).find((item) => item.id === templateId);
+  if (!template) {
+    return { shared: false, message: "Template not found." };
+  }
+
+  const packageId = `${slugifySkillName(template.name || template.id)}-${template.version.replace(/[^A-Za-z0-9_.-]/g, "_")}`;
+  const shareRoot = join(marketplaceShareRoot(config), packageId);
+  await rm(shareRoot, { recursive: true, force: true });
+  await mkdir(shareRoot, { recursive: true });
+
+  const onlineTemplate: SkillTemplateListing = {
+    ...template,
+    author: template.author || "Skill-Space",
+    source: "remote",
+    packageRoot: undefined,
+    installed: undefined,
+    requiredVariables: template.requiredVariables.map((variable) => ({ ...variable }))
+  };
+
+  if (template.packageRoot) {
+    const packageRoot = resolve(template.packageRoot);
+    if (!isPathInside(marketplaceRoot(config), packageRoot, true) && !isPathInside(publishRoot(config), packageRoot, true)) {
+      throw new Error("Refusing to share a template outside Skill-Space marketplace roots.");
+    }
+    await cp(packageRoot, join(shareRoot, "package"), { recursive: true, force: true });
+    const skillMarkdown = await readTextFile(join(packageRoot, "SKILL.md"));
+    if (skillMarkdown) {
+      onlineTemplate.templateMarkdown = skillMarkdown;
+    }
+  }
+
+  const catalogPath = join(shareRoot, "catalog.json");
+  await writeJsonFile(catalogPath, {
+    schemaVersion: "skillspace.marketplace.catalog.v1",
+    generatedAt: new Date().toISOString(),
+    templates: [onlineTemplate]
+  });
+  await writeJsonFile(join(shareRoot, "README.upload.json"), {
+    purpose: "Upload this folder or merge catalog.json into the online Skill-Space workflow library.",
+    catalogUrl: marketplaceCatalogUrl,
+    templateId: template.id,
+    note: "Runtime configuration fields are kept. Local path variables are hidden by Skill-Space and auto-filled on install."
+  });
+
+  return {
+    shared: true,
+    packageRoot: shareRoot,
+    catalogPath,
+    message: `分享包已生成：${shareRoot}`
+  };
+}
+
+async function copyTemplatePackageToSkill(
+  sourceRoot: string,
+  targetRoot: string,
+  variables: Record<string, string>
+): Promise<void> {
+  const sourceStat = await stat(sourceRoot).catch(() => null);
+  if (!sourceStat?.isDirectory()) {
+    throw new Error("Invalid template package path.");
+  }
+  await cp(sourceRoot, targetRoot, { recursive: true, force: true });
+  const files = await listSkillFiles(targetRoot);
+  const replacements = Object.entries(variables).flatMap(([key, value]) => [
+    [`{{path.${key}}}`, value],
+    [`{{secret.${key}}}`, value],
+    [`{{text.${key}}}`, value],
+    [`{{${key}}}`, value]
+  ]);
+
+  for (const file of files) {
+    if (file.kind !== "file" || !isPublishTextFile(file.path, file.size)) {
+      continue;
+    }
+    const targetPath = join(targetRoot, file.path);
+    if (!isPathInside(targetRoot, targetPath, true)) {
+      continue;
+    }
+    let text = await readFile(targetPath, "utf8");
+    for (const [placeholder, value] of replacements) {
+      text = text.split(placeholder).join(value);
+    }
+    await writeFile(targetPath, text, "utf8");
+  }
+}
+
+function applyTemplateVariablesToText(text: string, variables: Record<string, string>): string {
+  return Object.entries(variables).reduce((current, [key, value]) => {
+    return current
+      .split(`{{path.${key}}}`).join(value)
+      .split(`{{secret.${key}}}`).join(value)
+      .split(`{{text.${key}}}`).join(value)
+      .split(`{{${key}}}`).join(value);
+  }, text);
+}
+
+async function installMarketplaceTemplate(config: SkillSpaceConfig, request: InstallTemplateRequest): Promise<InstallTemplateResponse> {
+  const template = (await listMarketplaceTemplates(config)).find((item) => item.id === request.templateId);
+  if (!template) {
+    return { installed: false, message: "Template not found." };
+  }
+
+  const destination = await uniqueSkillRoot(config, template.id);
+  const metadataRoot = join(destination, ".skillspace");
+  await mkdir(metadataRoot, { recursive: true });
+  const effectiveVariables = Object.fromEntries(
+    template.requiredVariables.map((variable) => [
+      variable.key,
+      request.variables[variable.key] || (variable.kind === "path" ? destination : variable.placeholder)
+    ])
+  );
+
+  if (template.packageRoot) {
+    const packageRoot = resolve(template.packageRoot);
+    if (!isPathInside(publishRoot(config), packageRoot, true) && !isPathInside(marketplaceRoot(config), packageRoot, true)) {
+      throw new Error("Refusing to install a template outside Skill-Space publish roots.");
+    }
+    await copyTemplatePackageToSkill(packageRoot, destination, effectiveVariables);
+    await ensureSkillSpaceManifest(destination);
+    const skill = await scanSkillFolder(destination);
+    return {
+      installed: Boolean(skill),
+      skill: skill ?? undefined,
+      message: skill ? `Installed ${skill.name}.` : "Template installed, but Skill-Space could not read it."
+    };
+  }
+
+  const variableLines = template.requiredVariables
+    .map((variable) => `- ${variable.label}: ${effectiveVariables[variable.key] || variable.placeholder}`)
+    .join("\n");
+  const fallbackMarkdown = [
+    "---",
+    `name: ${template.id}`,
+    `description: ${template.description}`,
+    "---",
+    "",
+    `# ${template.name}`,
+    "",
+    template.description,
+    "",
+    "## 配置",
+    "",
+    variableLines || "- 无需额外配置",
+    "",
+    "## 工作流",
+    "",
+    "1. 读取用户配置和运行输入。",
+    "2. 按模板说明执行可复用工作流。",
+    "3. 输出结果、运行产物和必要的下一步确认。",
+    "",
+    "## 来源",
+    "",
+    `来自 Skill-Space 工作流库模板：${template.id} v${template.version}`,
+    ""
+  ].join("\n");
+  const markdown = applyTemplateVariablesToText(template.templateMarkdown?.trim() || fallbackMarkdown, effectiveVariables);
+
+  await writeFile(join(destination, "SKILL.md"), markdown, "utf8");
+  await writeJsonFile(join(metadataRoot, "manifest.json"), {
+    schemaVersion: "skillspace.skill.v1",
+    id: template.id,
+    name: template.name,
+    version: template.version,
+    description: template.description,
+    entry: "SKILL.md",
+    inputSchema: ".skillspace/inputs.schema.json",
+    permissions: ".skillspace/permissions.json",
+    runtimes: template.runtimes,
+    defaultRuntime: template.runtimes[0] ?? "claude",
+    tags: [template.category],
+    marketplace: {
+      templateId: template.id,
+      installedAt: new Date().toISOString(),
+      variables: effectiveVariables
+    }
+  });
+  await writeJsonFile(join(metadataRoot, "inputs.schema.json"), publishInputsSchema(template.requiredVariables));
+  await writeJsonFile(join(metadataRoot, "permissions.json"), {
+    mode: "full",
+    filesystem: { read: ["{{path.*}}"], write: ["{{path.*}}"] },
+    commands: { allow: ["*"], approvalRequired: [] },
+    network: { enabled: true, domains: ["*"] },
+    secrets: { allowReferences: true, storePlaintext: false }
+  });
+
+  const skill = await scanSkillFolder(destination);
+  return {
+    installed: Boolean(skill),
+    skill: skill ?? undefined,
+    message: skill ? `Installed ${skill.name}.` : "Template installed, but Skill-Space could not read it."
   };
 }
 
@@ -4118,8 +4927,15 @@ app.whenReady().then(() => {
 
   ipcMain.handle("skillspace:bootstrap", () => bootstrap());
   ipcMain.handle("skillspace:agents", async () => checkAgents(await ensureConfig()));
+  ipcMain.handle("skillspace:agent-candidates", async () => detectAgentCandidates(await ensureConfig()));
   ipcMain.handle("skillspace:agent-save", async (_, request: SaveAgentConfigRequest) =>
     saveAgentConfig(await ensureConfig(), request)
+  );
+  ipcMain.handle("skillspace:agent-test", async (_, request: SaveAgentConfigRequest) =>
+    testAgentConfig(await ensureConfig(), request)
+  );
+  ipcMain.handle("skillspace:agent-delete", async (_, agentId: AgentId) =>
+    deleteAgentConfig(await ensureConfig(), agentId)
   );
   ipcMain.handle("skillspace:storage-choose", () => chooseStorageRoot());
   ipcMain.handle("skillspace:storage-save", async (_, request: SaveStorageRootRequest) =>
@@ -4158,6 +4974,23 @@ app.whenReady().then(() => {
   );
   ipcMain.handle("skillspace:classify-skill-tags", async () =>
     classifySkillTags(await ensureConfig())
+  );
+  ipcMain.handle("skillspace:prepare-skill-package", async (_, skillId: string) =>
+    prepareSkillPackage(await ensureConfig(), skillId)
+  );
+  ipcMain.handle("skillspace:publish-skill-template", async (_, skillId: string) =>
+    publishSkillTemplate(await ensureConfig(), skillId)
+  );
+  ipcMain.handle("skillspace:marketplace-delete", async (_, templateId: string) =>
+    deleteMarketplaceTemplate(await ensureConfig(), templateId)
+  );
+  ipcMain.handle("skillspace:marketplace-share", async (_, templateId: string) =>
+    shareMarketplaceTemplate(await ensureConfig(), templateId)
+  );
+  ipcMain.handle("skillspace:marketplace-templates", async () => listMarketplaceTemplates(await ensureConfig()));
+  ipcMain.handle("skillspace:marketplace-refresh", async () => listMarketplaceTemplates(await ensureConfig(), true));
+  ipcMain.handle("skillspace:marketplace-install", async (_, request: InstallTemplateRequest) =>
+    installMarketplaceTemplate(await ensureConfig(), request)
   );
   ipcMain.handle("skillspace:import", async () => importSkill(await ensureConfig()));
   ipcMain.handle("skillspace:run", async (_, request: RunSkillRequest) =>

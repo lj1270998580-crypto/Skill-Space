@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.1.10-5ed8cf" />
+  <img alt="Version" src="https://img.shields.io/badge/version-0.1.17-5ed8cf" />
   <img alt="Platform" src="https://img.shields.io/badge/platform-Windows%2010%2F11-86e4d8" />
   <img alt="Runtime" src="https://img.shields.io/badge/runtime-Electron%20%2B%20React-cfd9ff" />
   <img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-e8d28d" />
@@ -29,22 +29,21 @@
 
 ### 当前版本
 
-- 最新版本：`0.1.10`
-- GitHub Release：<https://github.com/lj1270998580-crypto/Skill-Space/releases/tag/v0.1.10>
-- Windows 安装包：<https://github.com/lj1270998580-crypto/Skill-Space/releases/download/v0.1.10/Skill-Space-Setup-0.1.10-x64.exe>
+- 最新版本：`0.1.17`
+- GitHub Release：<https://github.com/lj1270998580-crypto/Skill-Space/releases/tag/v0.1.17>
+- Windows 安装包：<https://github.com/lj1270998580-crypto/Skill-Space/releases/download/v0.1.17/Skill-Space-Setup-0.1.17-x64.exe>
 - 在线更新源：<https://ailabing.cn/downloads/skill-space/latest.yml>
 - 默认执行器：Claude Code
 - 默认权限模式：个人本地使用，`full`
 
-### 0.1.10 更新重点
+### 0.1.17 更新重点
 
-- 修复在线更新版本比较逻辑，旧版本不会再被误判为新版本。
-- 优化智能体、技能库和设置页的窗口适配，减少窄宽度下的组件挤压。
-- 设置页支持修改本地存储根目录，并尝试迁移原有技能、运行记录、日志和配置。
-- 智能体配置支持命令、参数、工作目录和环境变量，减少硬编码路径。
-- 后台定时守护增加错误记录和界面告警，避免静默失败。
-- 增加运行目录和技能目录的路径安全校验。
-- 继续保留 LLM 管家、飞书协同、在线更新、技能编辑和定时自动化能力。
+- 新增工作流模板库：可在线刷新、安装通用模板，并显示本地安装状态。
+- 本地技能支持“加入工作流库”，生成去本机化后的模板包和运行必填配置。
+- 工作流库支持本地模板删除、分享包生成，以及服务器 `catalog.json` 在线浏览。
+- 安装模板时默认安装到本地技能库目录，用户只需要填写 API、账号、服务等运行配置。
+- 优化工作流库、智能体和窄窗口布局，减少卡片挤压与文字溢出。
+- 继续保留 LLM 管家、飞书协同、后台定时守护、在线更新和路径安全校验。
 
 ### 核心能力
 
@@ -52,6 +51,7 @@
 | --- | --- |
 | 总览 | 查看本地技能工作台、最近技能，并和 LLM 管家连续对话 |
 | 技能库 | 扫描电脑已有技能、手动导入、收藏、搜索、单标签分类 |
+| 工作流库 | 在线浏览可复用模板、安装模板、查看安装状态、删除本地模板和生成分享包 |
 | 技能详情 | 查看 `SKILL.md`、workflow、权限、适配器、最近变更和运行入口 |
 | LLM 修改技能 | 在 `SKILL.md` 下方让 LLM 管家按要求修改技能说明和流程 |
 | 多 Agent 执行 | 支持 Claude Code、Codex CLI、OpenClaw、Hermes Agent 等执行器 |
@@ -84,7 +84,7 @@ flowchart TD
 #### 普通用户
 
 1. 打开 [GitHub Releases](https://github.com/lj1270998580-crypto/Skill-Space/releases/latest)。
-2. 下载 `Skill-Space-Setup-0.1.10-x64.exe`。
+2. 下载 `Skill-Space-Setup-0.1.17-x64.exe`。
 3. 运行安装包，安装完成后从桌面或开始菜单打开 Skill-Space。
 
 #### Agent 自动安装
@@ -136,8 +136,8 @@ npm run dist:win
 Windows 安装包和在线更新文件由 `electron-builder` 生成：
 
 ```text
-release/Skill-Space-Setup-0.1.10-x64.exe
-release/Skill-Space-Setup-0.1.10-x64.exe.blockmap
+release/Skill-Space-Setup-0.1.17-x64.exe
+release/Skill-Space-Setup-0.1.17-x64.exe.blockmap
 release/latest.yml
 ```
 
@@ -153,22 +153,21 @@ https://ailabing.cn/downloads/skill-space/
 
 ### Current Version
 
-- Latest version: `0.1.10`
-- GitHub Release: <https://github.com/lj1270998580-crypto/Skill-Space/releases/tag/v0.1.10>
-- Windows installer: <https://github.com/lj1270998580-crypto/Skill-Space/releases/download/v0.1.10/Skill-Space-Setup-0.1.10-x64.exe>
+- Latest version: `0.1.17`
+- GitHub Release: <https://github.com/lj1270998580-crypto/Skill-Space/releases/tag/v0.1.17>
+- Windows installer: <https://github.com/lj1270998580-crypto/Skill-Space/releases/download/v0.1.17/Skill-Space-Setup-0.1.17-x64.exe>
 - Auto-update feed: <https://ailabing.cn/downloads/skill-space/latest.yml>
 - Default runner: Claude Code
 - Default permission mode: local personal use, `full`
 
-### What's New In 0.1.10
+### What's New In 0.1.17
 
-- Fixed online update version comparison so older builds are ignored correctly.
-- Improved responsive layouts for agent settings, skill cards, and settings panels.
-- Added configurable local storage root with best-effort data migration.
-- Added editable agent command, args, working directory, and environment variables.
-- Added scheduler error recording and visible UI warnings.
-- Added path safety checks for run and skill file operations.
-- Kept LLM steward, Feishu collaboration, online updates, skill editing, and scheduled automation.
+- Added the Workflow Template Library with online refresh, install status, and reusable template install.
+- Local skills can be prepared as generic workflow templates with required runtime configuration.
+- Local templates can be deleted from the library or exported as share packages.
+- Template install now uses the local skill library path automatically and only asks for runtime configuration such as APIs, accounts, and service options.
+- Improved marketplace, agent, and narrow-window layouts to reduce text overflow and cramped controls.
+- Kept the LLM steward, Feishu collaboration, background scheduler, online updater, and path safety checks.
 
 ### Features
 
@@ -176,6 +175,7 @@ https://ailabing.cn/downloads/skill-space/
 | --- | --- |
 | Dashboard | Local SkillOps overview, recent skills, and persistent LLM steward chat |
 | Skills | Scan local skills, import packages, search, favorite, and classify by one tag |
+| Workflow Library | Browse online templates, install reusable workflows, see install status, delete local templates, and export share packages |
 | Details | Inspect `SKILL.md`, workflow, schemas, permissions, adapters, and recent changes |
 | LLM Skill Editing | Ask the steward to revise the selected `SKILL.md` directly |
 | Multi-Agent Runtime | Run skills with Claude Code, Codex CLI, OpenClaw, Hermes Agent, or compatible runners |
@@ -188,7 +188,7 @@ https://ailabing.cn/downloads/skill-space/
 ### Install
 
 1. Open [GitHub Releases](https://github.com/lj1270998580-crypto/Skill-Space/releases/latest).
-2. Download `Skill-Space-Setup-0.1.10-x64.exe`.
+2. Download `Skill-Space-Setup-0.1.17-x64.exe`.
 3. Run the installer and launch Skill-Space from the desktop or Start Menu.
 
 ### Development

@@ -27,6 +27,7 @@ import {
   Minus,
   Moon,
   Play,
+  Plus,
   QrCode,
   RefreshCw,
   Search,
@@ -39,6 +40,7 @@ import {
   Tags,
   TerminalSquare,
   Trash2,
+  UploadCloud,
   Wand2,
   Workflow,
   X,
@@ -47,6 +49,7 @@ import {
 import { type ReactElement, useEffect, useMemo, useState } from "react";
 import type {
   AgentHealth,
+  AgentCandidate,
   AgentConfig,
   AgentId,
   BackgroundSchedulerStatus,
@@ -65,22 +68,30 @@ import type {
   ScheduledTask,
   SkillChange,
   SkillDetail,
+  SkillTemplateListing,
   SkillSummary,
   UpdateStatus
 } from "../../shared/types";
 import { createTranslator } from "./i18n";
 
-type ViewId = "dashboard" | "skills" | "runs" | "automations" | "agents" | "feishu" | "settings";
+type ViewId = "dashboard" | "skills" | "marketplace" | "runs" | "automations" | "agents" | "feishu" | "settings";
 type ThemeMode = "light" | "dark";
 type StewardChatMessage = {
   role: "user" | "assistant";
   content: string;
   at: string;
 };
+type AgentPreset = {
+  id: string;
+  label: string;
+  command: string;
+  args?: string[];
+};
 
 const navItems: Array<{ id: ViewId; labelKey: string; icon: typeof LayoutDashboard }> = [
   { id: "dashboard", labelKey: "nav.dashboard", icon: LayoutDashboard },
   { id: "skills", labelKey: "nav.skills", icon: Boxes },
+  { id: "marketplace", labelKey: "nav.marketplace", icon: Globe2 },
   { id: "runs", labelKey: "nav.runs", icon: TerminalSquare },
   { id: "automations", labelKey: "nav.automations", icon: AlarmClock },
   { id: "agents", labelKey: "nav.agents", icon: Bot },
@@ -112,6 +123,39 @@ const statusIcon = {
   disabled: CircleOff,
   checking: Loader2
 };
+
+const fallbackAgentPresets: AgentPreset[] = [
+  {
+    id: "gemini-cli",
+    label: "Gemini CLI",
+    command: "gemini",
+    args: ["-p", "{{prompt}}"]
+  },
+  {
+    id: "qwen-code",
+    label: "Qwen Code",
+    command: "qwen",
+    args: ["-p", "{{prompt}}"]
+  },
+  {
+    id: "aider",
+    label: "Aider",
+    command: "aider",
+    args: ["--message", "{{prompt}}"]
+  },
+  {
+    id: "opencode",
+    label: "OpenCode",
+    command: "opencode",
+    args: ["run", "{{prompt}}"]
+  },
+  {
+    id: "custom-agent",
+    label: "自定义智能体",
+    command: "",
+    args: ["{{prompt}}"]
+  }
+];
 
 function readStoredStewardMessages(): StewardChatMessage[] {
   try {
@@ -199,9 +243,21 @@ export function App(): ReactElement {
     }
   });
   const [isSummarizing, setIsSummarizing] = useState(false);
+  const [isPreparingPublish, setIsPreparingPublish] = useState(false);
+  const [isPublishingTemplate, setIsPublishingTemplate] = useState(false);
+  const [publishFeedback, setPublishFeedback] = useState("");
   const [isEditingSkill, setIsEditingSkill] = useState(false);
   const [skillEditPrompt, setSkillEditPrompt] = useState("");
   const [skillEditFeedback, setSkillEditFeedback] = useState("");
+  const [marketplaceTemplates, setMarketplaceTemplates] = useState<SkillTemplateListing[]>([]);
+  const [marketplaceQuery, setMarketplaceQuery] = useState("");
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(null);
+  const [templateVariables, setTemplateVariables] = useState<Record<string, string>>({});
+  const [isInstallingTemplate, setIsInstallingTemplate] = useState(false);
+  const [isRefreshingMarketplace, setIsRefreshingMarketplace] = useState(false);
+  const [isDeletingTemplate, setIsDeletingTemplate] = useState(false);
+  const [isSharingTemplate, setIsSharingTemplate] = useState(false);
+  const [marketplaceMessage, setMarketplaceMessage] = useState("");
   const [isRefreshing, setIsRefreshing] = useState(true);
   const [isRunning, setIsRunning] = useState(false);
   const [theme, setTheme] = useState<ThemeMode>(() => {
@@ -258,6 +314,34 @@ export function App(): ReactElement {
     });
   }, [payload?.skills, skillQuery, selectedTag, favoritesOnly, favoriteSkillIds, skillAliases]);
 
+  const filteredMarketplaceTemplates = useMemo(() => {
+    const query = marketplaceQuery.trim().toLowerCase();
+    return marketplaceTemplates.filter((template) => {
+      if (!query) {
+        return true;
+      }
+
+      return [
+        template.name,
+        template.description,
+        template.category,
+        template.author,
+        template.runtimes.join(" ")
+      ]
+        .join(" ")
+        .toLowerCase()
+        .includes(query);
+    });
+  }, [marketplaceTemplates, marketplaceQuery]);
+
+  const selectedTemplate = useMemo(() => {
+    if (marketplaceTemplates.length === 0) {
+      return null;
+    }
+
+    return marketplaceTemplates.find((template) => template.id === selectedTemplateId) ?? marketplaceTemplates[0];
+  }, [marketplaceTemplates, selectedTemplateId]);
+
   async function load(): Promise<void> {
     setIsRefreshing(true);
     const next = await window.skillSpace.bootstrap();
@@ -268,6 +352,7 @@ export function App(): ReactElement {
       window.skillSpace.getUpdateStatus(),
       window.skillSpace.listFeishuDecisionLogs()
     ]);
+    const templates = await window.skillSpace.listMarketplaceTemplates();
     const nextFeishuStatus = await window.skillSpace.getFeishuStatus();
     const storedLocale = window.localStorage.getItem("skillspace.locale") as Locale | null;
     setPayload(next);
@@ -279,6 +364,8 @@ export function App(): ReactElement {
     setFeishuDecisionLogs(nextFeishuDecisionLogs);
     setLlmStatus(nextLlmStatus);
     setUpdateStatus(nextUpdateStatus);
+    setMarketplaceTemplates(templates);
+    setSelectedTemplateId((current) => current ?? templates[0]?.id ?? null);
     setSelectedRunId((current) => current ?? next.runs[0]?.runId ?? null);
     setLocale(
       storedLocale && next.config.locale.supported.includes(storedLocale)
@@ -303,12 +390,13 @@ export function App(): ReactElement {
       window.skillSpace.listRuns(),
       window.skillSpace.listSchedules()
     ]);
-    const [changes, schedulerStatus, nextLlmStatus, nextUpdateStatus, nextFeishuDecisionLogs] = await Promise.all([
+    const [changes, schedulerStatus, nextLlmStatus, nextUpdateStatus, nextFeishuDecisionLogs, templates] = await Promise.all([
       window.skillSpace.listSkillChanges(),
       window.skillSpace.getBackgroundSchedulerStatus(),
       window.skillSpace.getLlmStatus(),
       window.skillSpace.getUpdateStatus(),
-      window.skillSpace.listFeishuDecisionLogs()
+      window.skillSpace.listFeishuDecisionLogs(),
+      window.skillSpace.listMarketplaceTemplates()
     ]);
     const nextFeishuStatus = await window.skillSpace.getFeishuStatus();
     setPayload((current) => (current ? { ...current, agents, skills, runs, schedules: nextSchedules } : current));
@@ -320,6 +408,8 @@ export function App(): ReactElement {
     setFeishuDecisionLogs(nextFeishuDecisionLogs);
     setLlmStatus(nextLlmStatus);
     setUpdateStatus(nextUpdateStatus);
+    setMarketplaceTemplates(templates);
+    setSelectedTemplateId((current) => current ?? templates[0]?.id ?? null);
     setSelectedRunId((current) => current ?? runs[0]?.runId ?? null);
     setSelectedSkillId((current) => current ?? skills[0]?.id ?? null);
     if (selectedSkillId) {
@@ -333,6 +423,20 @@ export function App(): ReactElement {
     setPayload(next);
     setRunHistory(next.runs);
     setSchedules(next.schedules);
+  }
+
+  async function deleteAgent(agentId: AgentId): Promise<void> {
+    const next = await window.skillSpace.deleteAgentConfig(agentId);
+    setPayload(next);
+    setRunHistory(next.runs);
+    setSchedules(next.schedules);
+    if (selectedAgent === agentId) {
+      setSelectedAgent(next.config.defaultRuntime);
+    }
+  }
+
+  async function testAgent(agentId: AgentId, config: AgentConfig): Promise<AgentHealth> {
+    return window.skillSpace.testAgentConfig({ agentId, config });
   }
 
   async function saveStorageRoot(dataRoot: string): Promise<string> {
@@ -356,6 +460,97 @@ export function App(): ReactElement {
     setRunHistory(runs);
     setSelectedSkillId(response.skill?.id ?? skills[0]?.id ?? null);
     setActiveView("skills");
+  }
+
+  async function installSelectedTemplate(): Promise<void> {
+    if (!selectedTemplate) {
+      return;
+    }
+
+    setIsInstallingTemplate(true);
+    setMarketplaceMessage("");
+    try {
+      const response = await window.skillSpace.installMarketplaceTemplate({
+        templateId: selectedTemplate.id,
+        variables: templateVariables
+      });
+      setMarketplaceMessage(response.message);
+      if (response.installed) {
+        const [skills, runs, templates] = await Promise.all([
+          window.skillSpace.scanSkills(),
+          window.skillSpace.listRuns(),
+          window.skillSpace.listMarketplaceTemplates()
+        ]);
+        setPayload((current) => (current ? { ...current, skills, runs } : current));
+        setMarketplaceTemplates(templates);
+        setRunHistory(runs);
+        setSelectedSkillId(response.skill?.id ?? skills[0]?.id ?? null);
+        setActiveView("skills");
+      }
+    } catch (error) {
+      setMarketplaceMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsInstallingTemplate(false);
+    }
+  }
+
+  async function refreshMarketplace(): Promise<void> {
+    setIsRefreshingMarketplace(true);
+    setMarketplaceMessage("");
+    try {
+      const [templates, skills] = await Promise.all([
+        window.skillSpace.refreshMarketplaceTemplates(),
+        window.skillSpace.scanSkills()
+      ]);
+      setMarketplaceTemplates(templates);
+      setPayload((current) => (current ? { ...current, skills } : current));
+      setSelectedTemplateId((current) => current ?? templates[0]?.id ?? null);
+      const remoteCount = templates.filter((template) => template.source === "remote").length;
+      setMarketplaceMessage(`${t("marketplace.refreshDone")}: ${templates.length} / ${t("marketplace.remote")}: ${remoteCount}`);
+    } catch (error) {
+      setMarketplaceMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsRefreshingMarketplace(false);
+    }
+  }
+
+  async function deleteSelectedTemplate(): Promise<void> {
+    if (!selectedTemplate) {
+      return;
+    }
+
+    setIsDeletingTemplate(true);
+    setMarketplaceMessage("");
+    try {
+      const response = await window.skillSpace.deleteMarketplaceTemplate(selectedTemplate.id);
+      const templates = await window.skillSpace.listMarketplaceTemplates();
+      setMarketplaceTemplates(templates);
+      setSelectedTemplateId((current) =>
+        current === selectedTemplate.id ? templates[0]?.id ?? null : current
+      );
+      setMarketplaceMessage(response.message);
+    } catch (error) {
+      setMarketplaceMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsDeletingTemplate(false);
+    }
+  }
+
+  async function shareSelectedTemplate(): Promise<void> {
+    if (!selectedTemplate) {
+      return;
+    }
+
+    setIsSharingTemplate(true);
+    setMarketplaceMessage("");
+    try {
+      const response = await window.skillSpace.shareMarketplaceTemplate(selectedTemplate.id);
+      setMarketplaceMessage(response.message);
+    } catch (error) {
+      setMarketplaceMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsSharingTemplate(false);
+    }
   }
 
   async function runSelectedSkill(): Promise<void> {
@@ -470,6 +665,48 @@ export function App(): ReactElement {
       setSelectedSkillDetail((detail) => (detail ? { ...detail, description: response.summary } : detail));
     } finally {
       setIsSummarizing(false);
+    }
+  }
+
+  async function prepareSelectedSkillPackage(): Promise<void> {
+    if (!selectedSkill) {
+      return;
+    }
+
+    setIsPreparingPublish(true);
+    setPublishFeedback("");
+    try {
+      const response = await window.skillSpace.prepareSkillPackage(selectedSkill.id);
+      setPublishFeedback(
+        `${t("publish.ready")}: ${response.packageRoot}\n${t("publish.files")}: ${response.filesCopied} / ${t("publish.variables")}: ${response.variables.length} / ${t("publish.warnings")}: ${response.warnings.length}`
+      );
+    } catch (error) {
+      setPublishFeedback(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsPreparingPublish(false);
+    }
+  }
+
+  async function publishSelectedSkillTemplate(): Promise<void> {
+    if (!selectedSkill) {
+      return;
+    }
+
+    setIsPublishingTemplate(true);
+    setPublishFeedback("");
+    try {
+      const response = await window.skillSpace.publishSkillTemplate(selectedSkill.id);
+      const templates = await window.skillSpace.listMarketplaceTemplates();
+      setMarketplaceTemplates(templates);
+      setSelectedTemplateId(response.template?.id ?? templates[0]?.id ?? null);
+      setPublishFeedback(
+        `${response.message}\n${t("publish.files")}: ${response.packageRoot ?? ""} / ${t("publish.warnings")}: ${response.warnings.length}`
+      );
+      setActiveView("marketplace");
+    } catch (error) {
+      setPublishFeedback(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsPublishingTemplate(false);
     }
   }
 
@@ -1047,7 +1284,9 @@ export function App(): ReactElement {
           </div>
         </header>
 
-        <div className={`content-grid ${activeView === "feishu" || activeView === "settings" ? "no-inspector" : ""}`}>
+        <div
+          className={`content-grid ${activeView === "feishu" || activeView === "settings" || activeView === "marketplace" ? "no-inspector" : ""} ${activeView === "agents" ? "agent-view" : ""}`}
+        >
           <section className="main-stage">
             <MetricStrip
               t={t}
@@ -1107,11 +1346,44 @@ export function App(): ReactElement {
               />
             )}
 
+            {activeView === "marketplace" && (
+              <MarketplacePanel
+                templates={filteredMarketplaceTemplates}
+                selectedTemplate={selectedTemplate}
+                query={marketplaceQuery}
+                variables={templateVariables}
+                message={marketplaceMessage}
+                isInstalling={isInstallingTemplate}
+                isRefreshing={isRefreshingMarketplace}
+                isDeleting={isDeletingTemplate}
+                isSharing={isSharingTemplate}
+                locale={locale}
+                onQueryChange={setMarketplaceQuery}
+                onSelect={(template) => {
+                  setSelectedTemplateId(template.id);
+                  setMarketplaceMessage("");
+                }}
+                onVariableChange={(key, value) =>
+                  setTemplateVariables((current) => ({
+                    ...current,
+                    [key]: value
+                  }))
+                }
+                onInstall={() => void installSelectedTemplate()}
+                onRefresh={() => void refreshMarketplace()}
+                onDelete={() => void deleteSelectedTemplate()}
+                onShare={() => void shareSelectedTemplate()}
+                t={t}
+              />
+            )}
+
             {activeView === "agents" && (
               <AgentPanel
                 agents={payload?.agents ?? []}
                 configs={payload?.config.agents ?? ({} as Record<AgentId, AgentConfig>)}
                 onSave={saveAgent}
+                onDelete={deleteAgent}
+                onTest={testAgent}
                 t={t}
               />
             )}
@@ -1198,7 +1470,7 @@ export function App(): ReactElement {
             )}
           </section>
 
-          {activeView !== "feishu" && activeView !== "settings" && <aside className="inspector glass-panel">
+          {activeView !== "feishu" && activeView !== "settings" && activeView !== "marketplace" && <aside className="inspector glass-panel">
             {activeView === "runs" ? (
               <RunSidePanel
                 selectedRun={selectedRun}
@@ -1227,13 +1499,18 @@ export function App(): ReactElement {
                 onRunInputChange={setRunInput}
                 onRun={() => void runSelectedSkill()}
                 onSummarize={() => void summarizeSelectedSkill()}
+                onPreparePublish={() => void prepareSelectedSkillPackage()}
+                onPublishTemplate={() => void publishSelectedSkillTemplate()}
                 skillEditPrompt={skillEditPrompt}
                 skillEditFeedback={skillEditFeedback}
+                publishFeedback={publishFeedback}
                 isEditingSkill={isEditingSkill}
                 onSkillEditPromptChange={setSkillEditPrompt}
                 onEditSkill={() => void editSelectedSkillWithLlm()}
                 isRunning={isRunning}
                 isSummarizing={isSummarizing}
+                isPreparingPublish={isPreparingPublish}
+                isPublishingTemplate={isPublishingTemplate}
                 useParameterForm={useParameterForm}
                 skillChanges={skillChanges.filter((change) => change.skillId === selectedSkill?.id).slice(0, 3)}
                 t={t}
@@ -1585,6 +1862,189 @@ function SkillLibrary({
   );
 }
 
+function MarketplacePanel({
+  templates,
+  selectedTemplate,
+  query,
+  variables,
+  message,
+  isInstalling,
+  isRefreshing,
+  isDeleting,
+  isSharing,
+  locale,
+  onQueryChange,
+  onSelect,
+  onVariableChange,
+  onInstall,
+  onRefresh,
+  onDelete,
+  onShare,
+  t
+}: {
+  templates: SkillTemplateListing[];
+  selectedTemplate: SkillTemplateListing | null;
+  query: string;
+  variables: Record<string, string>;
+  message: string;
+  isInstalling: boolean;
+  isRefreshing: boolean;
+  isDeleting: boolean;
+  isSharing: boolean;
+  locale: Locale;
+  onQueryChange: (value: string) => void;
+  onSelect: (template: SkillTemplateListing) => void;
+  onVariableChange: (key: string, value: string) => void;
+  onInstall: () => void;
+  onRefresh: () => void;
+  onDelete: () => void;
+  onShare: () => void;
+  t: (key: string) => string;
+}): ReactElement {
+  const configurableVariables = selectedTemplate?.requiredVariables.filter((variable) => variable.kind !== "path") ?? [];
+  const missingRequired = configurableVariables.some(
+    (variable) => !variables[variable.key]?.trim()
+  );
+
+  return (
+    <section className="marketplace-shell">
+      <div className="marketplace-hero glass-panel">
+        <div>
+          <span>{t("marketplace.kicker")}</span>
+          <strong>{t("marketplace.title")}</strong>
+          <p>{t("marketplace.subtitle")}</p>
+        </div>
+        <div className="marketplace-hero-actions">
+          <button className="secondary-button" onClick={onRefresh} type="button" disabled={isRefreshing}>
+            {isRefreshing ? <Loader2 size={16} className="spin" /> : <RefreshCw size={16} />}
+            <span>{t("marketplace.refresh")}</span>
+          </button>
+          <div className="marketplace-proof">
+            <span>{templates.length}</span>
+            <small>{t("marketplace.available")}</small>
+          </div>
+        </div>
+      </div>
+
+      <div className="marketplace-body">
+        <div className="marketplace-list glass-panel">
+          <label className="search-box">
+            <Search size={16} />
+            <input value={query} onChange={(event) => onQueryChange(event.target.value)} placeholder={t("marketplace.search")} />
+          </label>
+
+          <div className="template-grid">
+            {templates.length === 0 ? (
+              <div className="empty-state compact">
+                <Search size={24} />
+                <strong>{t("marketplace.empty")}</strong>
+              </div>
+            ) : (
+              templates.map((template) => (
+                <button
+                  className={`template-card glass-panel ${selectedTemplate?.id === template.id ? "selected" : ""}`}
+                  key={template.id}
+                  onClick={() => onSelect(template)}
+                  type="button"
+                >
+                  <div className="template-card-head">
+                    <div>
+                      <strong>{template.name}</strong>
+                      <span>{template.category} / {template.author}</span>
+                    </div>
+                    {template.installed ? <CheckCircle2 size={18} /> : <Globe2 size={18} />}
+                  </div>
+                  <p>{template.description}</p>
+                  <div className="template-meta">
+                    <span>{t(`marketplace.${template.source ?? "official"}`)}</span>
+                    <span>{template.installed ? t("marketplace.installed") : t("marketplace.notInstalled")}</span>
+                    <span>{t("marketplace.downloads")} {template.downloads}</span>
+                    <span>{t("marketplace.rating")} {template.rating.toFixed(1)}</span>
+                    <span>{formatDate(template.updatedAt, locale)}</span>
+                  </div>
+                </button>
+              ))
+            )}
+          </div>
+        </div>
+
+        <aside className="template-detail glass-panel">
+          {selectedTemplate ? (
+            <>
+              <div className="template-detail-title">
+                <div>
+                  <span>{selectedTemplate.category}</span>
+                  <strong>{selectedTemplate.name}</strong>
+                </div>
+                <span className={`safety-pill ${selectedTemplate.safetyStatus}`}>
+                  {t(`marketplace.safety.${selectedTemplate.safetyStatus}`)}
+                </span>
+              </div>
+              <p>{selectedTemplate.description}</p>
+              <div className="template-stats">
+                <span>{t(`marketplace.${selectedTemplate.source ?? "official"}`)}</span>
+                <span>{selectedTemplate.installed ? t("marketplace.installed") : t("marketplace.notInstalled")}</span>
+                <span>{t("view.version")} {selectedTemplate.version}</span>
+                <span>{t("marketplace.downloads")} {selectedTemplate.downloads}</span>
+                <span>{t("marketplace.rating")} {selectedTemplate.rating.toFixed(1)}</span>
+              </div>
+              <div className="chip-row">
+                {selectedTemplate.runtimes.map((runtime) => (
+                  <span className="chip" key={runtime}>{runtime}</span>
+                ))}
+              </div>
+
+              <div className="template-config">
+                <strong>{t("marketplace.variables")}</strong>
+                {configurableVariables.length === 0 ? (
+                  <span className="muted">{t("marketplace.noVariables")}</span>
+                ) : (
+                  configurableVariables.map((variable) => (
+                    <label className="form-field" key={variable.key}>
+                      <span>
+                        {variable.label || variable.key}
+                        *
+                      </span>
+                      <input
+                        value={variables[variable.key] ?? ""}
+                        onChange={(event) => onVariableChange(variable.key, event.target.value)}
+                        placeholder={variable.example || variable.placeholder || variable.key}
+                      />
+                    </label>
+                  ))
+                )}
+              </div>
+
+              {message && <div className="inline-message">{message}</div>}
+
+              <div className="template-actions">
+                <button className="primary-button wide" onClick={onInstall} type="button" disabled={isInstalling || missingRequired || selectedTemplate.installed}>
+                  {isInstalling ? <Loader2 size={16} className="spin" /> : <DownloadCloud size={16} />}
+                  <span>{selectedTemplate.installed ? t("marketplace.installed") : t("marketplace.install")}</span>
+                </button>
+                <button className="secondary-button" onClick={onShare} type="button" disabled={isSharing}>
+                  {isSharing ? <Loader2 size={16} className="spin" /> : <UploadCloud size={16} />}
+                  <span>{t("marketplace.share")}</span>
+                </button>
+                {selectedTemplate.source === "local" && (
+                  <button className="icon-button danger" onClick={onDelete} type="button" disabled={isDeleting} title={t("marketplace.delete")}>
+                    {isDeleting ? <Loader2 size={16} className="spin" /> : <Trash2 size={16} />}
+                  </button>
+                )}
+              </div>
+            </>
+          ) : (
+            <div className="empty-state compact">
+              <Globe2 size={24} />
+              <strong>{t("marketplace.empty")}</strong>
+            </div>
+          )}
+        </aside>
+      </div>
+    </section>
+  );
+}
+
 function DiscoveryModal({
   discoveredSkills,
   isDiscovering,
@@ -1734,23 +2194,62 @@ function parseEnvText(value: string): Record<string, string> {
   );
 }
 
+function uniqueAgentId(baseId: string, configs: Record<string, AgentConfig>): string {
+  const normalized = baseId
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 40) || "custom-agent";
+  if (!configs[normalized]) {
+    return normalized;
+  }
+
+  for (let index = 2; index < 100; index += 1) {
+    const candidate = `${normalized}-${index}`;
+    if (!configs[candidate]) {
+      return candidate;
+    }
+  }
+  return `${normalized}-${Date.now().toString(36)}`;
+}
+
+function isAgentCandidate(value: AgentPreset | AgentCandidate): value is AgentCandidate {
+  return "installed" in value && "alreadyConfigured" in value;
+}
+
 function AgentPanel({
   agents,
   configs,
   onSave,
+  onDelete,
+  onTest,
   t
 }: {
   agents: AgentHealth[];
   configs: Record<AgentId, AgentConfig>;
   onSave: (agentId: AgentId, config: AgentConfig) => Promise<void>;
+  onDelete: (agentId: AgentId) => Promise<void>;
+  onTest: (agentId: AgentId, config: AgentConfig) => Promise<AgentHealth>;
   t: (key: string) => string;
 }): ReactElement {
   const [drafts, setDrafts] = useState<Record<string, AgentConfig>>({});
   const [savingAgentId, setSavingAgentId] = useState<AgentId | null>(null);
+  const [testingAgentId, setTestingAgentId] = useState<AgentId | null>(null);
+  const [testResults, setTestResults] = useState<Record<string, AgentHealth>>({});
+  const [selectedPresetId, setSelectedPresetId] = useState(fallbackAgentPresets[0]?.id ?? "custom-agent");
+  const [candidates, setCandidates] = useState<AgentCandidate[]>([]);
+  const [isDetecting, setIsDetecting] = useState(false);
+  const agentOptions = candidates.length > 0
+    ? [...candidates, ...fallbackAgentPresets.filter((preset) => !candidates.some((candidate) => candidate.id === preset.id))]
+    : fallbackAgentPresets;
 
   useEffect(() => {
     setDrafts(configs);
   }, [configs]);
+
+  useEffect(() => {
+    void detectCandidates();
+  }, []);
 
   function updateDraft(agentId: AgentId, patch: Partial<AgentConfig>): void {
     setDrafts((current) => ({
@@ -1771,25 +2270,111 @@ function AgentPanel({
     }
   }
 
+  async function testDraft(agentId: AgentId): Promise<void> {
+    setTestingAgentId(agentId);
+    try {
+      const result = await onTest(agentId, drafts[agentId] ?? configs[agentId]);
+      setTestResults((current) => ({ ...current, [agentId]: result }));
+    } finally {
+      window.setTimeout(() => setTestingAgentId(null), 400);
+    }
+  }
+
+  async function deleteDraft(agentId: AgentId): Promise<void> {
+    await onDelete(agentId);
+    setDrafts((current) => {
+      const next = { ...current };
+      delete next[agentId];
+      return next;
+    });
+  }
+
+  async function detectCandidates(): Promise<void> {
+    setIsDetecting(true);
+    try {
+      const nextCandidates = await window.skillSpace.detectAgentCandidates();
+      setCandidates(nextCandidates);
+      const firstAvailable = nextCandidates.find((candidate) => candidate.installed && !candidate.alreadyConfigured) ?? nextCandidates.find((candidate) => candidate.installed);
+      if (firstAvailable) {
+        setSelectedPresetId(firstAvailable.id);
+      }
+    } finally {
+      setIsDetecting(false);
+    }
+  }
+
+  async function addPresetAgent(): Promise<void> {
+    const preset =
+      candidates.find((item) => item.id === selectedPresetId) ??
+      fallbackAgentPresets.find((item) => item.id === selectedPresetId) ??
+      fallbackAgentPresets[0];
+    if (!preset) {
+      return;
+    }
+
+    const agentId = isAgentCandidate(preset) && preset.alreadyConfigured ? preset.id : uniqueAgentId(preset.id, configs);
+    const config: AgentConfig = {
+      enabled: true,
+      label: preset.label,
+      command: preset.command,
+      args: preset.args ?? ["{{prompt}}"]
+    };
+    setDrafts((current) => ({ ...current, [agentId]: config }));
+    setSavingAgentId(agentId);
+    try {
+      await onSave(agentId, config);
+    } finally {
+      window.setTimeout(() => setSavingAgentId(null), 400);
+    }
+  }
+
   return (
     <section className="agent-list">
+      <div className="agent-add-panel glass-panel">
+        <div>
+          <strong>{t("agent.addDetected")}</strong>
+          <span>{t("agent.addDetectedHint")}</span>
+        </div>
+        <select className="glass-select" value={selectedPresetId} onChange={(event) => setSelectedPresetId(event.target.value)}>
+          {agentOptions.map((preset) => (
+            <option key={preset.id} value={preset.id}>
+              {isAgentCandidate(preset)
+                ? `${preset.installed ? "已安装" : "未检测"} · ${preset.label}${preset.alreadyConfigured ? " · 已配置" : ""}`
+                : preset.label}
+            </option>
+          ))}
+        </select>
+        <button className="secondary-button" type="button" onClick={() => void detectCandidates()} disabled={isDetecting}>
+          {isDetecting ? <Loader2 size={15} className="spin" /> : <RefreshCw size={15} />}
+          <span>{t("agent.detect")}</span>
+        </button>
+        <button className="secondary-button" type="button" onClick={() => void addPresetAgent()}>
+          <Plus size={15} />
+          <span>{t("agent.add")}</span>
+        </button>
+      </div>
+      <div className="agent-card-grid">
       {agents.map((agent) => {
         const Icon = statusIcon[agent.status];
         const draft = drafts[agent.id] ?? configs[agent.id] ?? { enabled: false, label: agent.label };
         const argsText = (draft?.args ?? []).join("\n");
         const envText = Object.entries(draft?.env ?? {}).map(([key, value]) => `${key}=${value}`).join("\n");
+        const testResult = testResults[agent.id];
+        const displayedStatus = testResult?.status ?? agent.status;
+        const displayedDetail = testResult?.detail ?? agent.detail;
+        const canDelete = !["claude", "codex", "openclaw", "hermes"].includes(agent.id);
         return (
           <article className="agent-row glass-panel" key={agent.id}>
             <div className="agent-row-summary">
-              <div className={`agent-status ${agent.status}`}>
-                <Icon size={18} className={agent.status === "checking" ? "spin" : ""} />
+              <div className={`agent-status ${displayedStatus}`}>
+                <Icon size={18} className={displayedStatus === "checking" ? "spin" : ""} />
               </div>
               <div>
                 <strong>{agent.label}</strong>
                 <span>{agent.command ?? agent.id}</span>
               </div>
-              <p>{agent.detail}</p>
-              <b>{t(`status.${agent.status}`)}</b>
+              <p>{displayedDetail}</p>
+              <b>{t(`status.${displayedStatus}`)}</b>
             </div>
             <div className="agent-config-grid">
               <label>
@@ -1827,14 +2412,27 @@ function AgentPanel({
                   placeholder="KEY=value"
                 />
               </label>
-              <button className="secondary-button" onClick={() => void saveDraft(agent.id)} type="button" disabled={savingAgentId === agent.id}>
-                {savingAgentId === agent.id ? <Loader2 size={15} className="spin" /> : <CheckCircle2 size={15} />}
-                <span>{t("action.save")}</span>
-              </button>
+              <div className="agent-card-actions">
+                <button className="secondary-button" onClick={() => void testDraft(agent.id)} type="button" disabled={testingAgentId === agent.id}>
+                  {testingAgentId === agent.id ? <Loader2 size={15} className="spin" /> : <Gauge size={15} />}
+                  <span>{t("agent.test")}</span>
+                </button>
+                <button className="secondary-button" onClick={() => void saveDraft(agent.id)} type="button" disabled={savingAgentId === agent.id}>
+                  {savingAgentId === agent.id ? <Loader2 size={15} className="spin" /> : <CheckCircle2 size={15} />}
+                  <span>{t("action.save")}</span>
+                </button>
+                {canDelete && (
+                  <button className="text-button danger" onClick={() => void deleteDraft(agent.id)} type="button">
+                    <Trash2 size={15} />
+                    <span>{t("action.delete")}</span>
+                  </button>
+                )}
+              </div>
             </div>
           </article>
         );
       })}
+      </div>
     </section>
   );
 }
@@ -2823,13 +3421,18 @@ function SkillInspector({
   onRunInputChange,
   onRun,
   onSummarize,
+  onPreparePublish,
+  onPublishTemplate,
   skillEditPrompt,
   skillEditFeedback,
+  publishFeedback,
   isEditingSkill,
   onSkillEditPromptChange,
   onEditSkill,
   isRunning,
   isSummarizing,
+  isPreparingPublish,
+  isPublishingTemplate,
   useParameterForm,
   skillChanges,
   t
@@ -2847,13 +3450,18 @@ function SkillInspector({
   onRunInputChange: (input: string) => void;
   onRun: () => void;
   onSummarize: () => void;
+  onPreparePublish: () => void;
+  onPublishTemplate: () => void;
   skillEditPrompt: string;
   skillEditFeedback: string;
+  publishFeedback: string;
   isEditingSkill: boolean;
   onSkillEditPromptChange: (value: string) => void;
   onEditSkill: () => void;
   isRunning: boolean;
   isSummarizing: boolean;
+  isPreparingPublish: boolean;
+  isPublishingTemplate: boolean;
   useParameterForm: boolean;
   skillChanges: SkillChange[];
   t: (key: string) => string;
@@ -2896,6 +3504,15 @@ function SkillInspector({
           {isSummarizing ? <Loader2 size={15} className="spin" /> : <Wand2 size={15} />}
           <span>{t("action.summarize")}</span>
         </button>
+        <button className="secondary-button compact" onClick={onPreparePublish} type="button" disabled={!detail || isPreparingPublish}>
+          {isPreparingPublish ? <Loader2 size={15} className="spin" /> : <FolderInput size={15} />}
+          <span>{t("publish.prepare")}</span>
+        </button>
+        <button className="secondary-button compact" onClick={onPublishTemplate} type="button" disabled={!detail || isPublishingTemplate}>
+          {isPublishingTemplate ? <Loader2 size={15} className="spin" /> : <Globe2 size={15} />}
+          <span>{t("publish.toLibrary")}</span>
+        </button>
+        {publishFeedback && <p className="publish-feedback">{publishFeedback}</p>}
       </div>
 
       <div className="meta-list">
