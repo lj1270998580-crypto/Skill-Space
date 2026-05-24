@@ -1118,9 +1118,26 @@ export function App(): ReactElement {
 
   async function downloadUpdate(): Promise<void> {
     setUpdateMessage(t("update.downloading"));
-    const status = await window.skillSpace.downloadUpdate();
-    setUpdateStatus(status);
-    setUpdateMessage(status.detail);
+    setIsUpdateDialogOpen(true);
+    try {
+      const status = await window.skillSpace.downloadUpdate();
+      setUpdateStatus(status);
+      setUpdateMessage(status.detail);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      setUpdateStatus((current) => ({
+        currentVersion: current?.currentVersion ?? "0.0.0",
+        availableVersion: current?.availableVersion,
+        releaseNotes: current?.releaseNotes,
+        releaseName: current?.releaseName,
+        releaseDate: current?.releaseDate,
+        state: "error",
+        detail,
+        error: detail,
+        lastCheckedAt: new Date().toISOString()
+      }));
+      setUpdateMessage(detail);
+    }
   }
 
   async function installUpdate(): Promise<void> {
@@ -1137,7 +1154,7 @@ export function App(): ReactElement {
 
   useEffect(() => {
     void load();
-    return window.skillSpace.onRunEvent((event) => {
+    const offRunEvent = window.skillSpace.onRunEvent((event) => {
       setSelectedRunId(event.runId);
       setRunEvents((events) => [...events.slice(-300), event]);
       if (event.type === "closed" || event.type === "error") {
@@ -1156,6 +1173,17 @@ export function App(): ReactElement {
         });
       }
     });
+    const offUpdateStatus = window.skillSpace.onUpdateStatus((status) => {
+      setUpdateStatus(status);
+      setUpdateMessage(status.detail);
+      if (["available", "downloading", "downloaded", "error"].includes(status.state)) {
+        setIsUpdateDialogOpen(true);
+      }
+    });
+    return () => {
+      offRunEvent();
+      offUpdateStatus();
+    };
   }, []);
 
   useEffect(() => {
@@ -1638,14 +1666,14 @@ export function App(): ReactElement {
           t={t}
         />
       )}
-      {isUpdateDialogOpen && updateStatus?.state === "available" && (
+      {isUpdateDialogOpen && updateStatus && ["available", "downloading", "downloaded", "error"].includes(updateStatus.state) && (
         <UpdateModal
           status={updateStatus}
           onClose={() => setIsUpdateDialogOpen(false)}
           onDownload={() => {
-            setIsUpdateDialogOpen(false);
             void downloadUpdate();
           }}
+          onInstall={() => void installUpdate()}
           t={t}
         />
       )}
@@ -2278,13 +2306,18 @@ function UpdateModal({
   status,
   onClose,
   onDownload,
+  onInstall,
   t
 }: {
   status: UpdateStatus;
   onClose: () => void;
   onDownload: () => void;
+  onInstall: () => void;
   t: (key: string) => string;
 }): ReactElement {
+  const isDownloading = status.state === "downloading";
+  const isDownloaded = status.state === "downloaded";
+  const isError = status.state === "error";
   return (
     <div className="modal-backdrop" role="presentation">
       <section className="update-modal glass-panel" role="dialog" aria-modal="true" aria-label={t("update.title")}>
@@ -2301,6 +2334,8 @@ function UpdateModal({
           <span>{t("update.current")}: {status.currentVersion}</span>
           <strong>{t("update.available")}: {status.availableVersion ?? t("view.none")}</strong>
           {status.releaseName && <p>{status.releaseName}</p>}
+          <p>{status.detail}</p>
+          {isError && status.error && <p className="danger-copy">{status.error}</p>}
         </div>
         <div className="update-notes">
           <strong>{t("update.notes")}</strong>
@@ -2310,9 +2345,14 @@ function UpdateModal({
           <button className="secondary-button" onClick={onClose} type="button">
             {t("update.later")}
           </button>
-          <button className="primary-button" onClick={onDownload} type="button">
-            <DownloadCloud size={16} />
-            <span>{t("update.download")}</span>
+          <button
+            className="primary-button"
+            onClick={isDownloaded ? onInstall : onDownload}
+            type="button"
+            disabled={isDownloading}
+          >
+            {isDownloading ? <Loader2 size={16} className="spin" /> : <DownloadCloud size={16} />}
+            <span>{isDownloaded ? t("update.install") : isDownloading ? t("update.downloading") : t("update.download")}</span>
           </button>
         </div>
       </section>

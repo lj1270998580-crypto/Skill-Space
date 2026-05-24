@@ -34,7 +34,8 @@ import type {
   SkillChange,
   SkillDetail,
   SkillSpaceApi,
-  SkillSummary
+  SkillSummary,
+  UpdateStatus
 } from "../shared/types";
 
 const api: SkillSpaceApi = {
@@ -126,6 +127,11 @@ const api: SkillSpaceApi = {
     const listener = (_: Electron.IpcRendererEvent, event: RunEvent): void => callback(event);
     ipcRenderer.on("skillspace:run-event", listener);
     return () => ipcRenderer.removeListener("skillspace:run-event", listener);
+  },
+  onUpdateStatus: (callback: (status: UpdateStatus) => void) => {
+    const listener = (_: Electron.IpcRendererEvent, status: UpdateStatus): void => callback(status);
+    ipcRenderer.on("skillspace:update-status-changed", listener);
+    return () => ipcRenderer.removeListener("skillspace:update-status-changed", listener);
   }
 };
 

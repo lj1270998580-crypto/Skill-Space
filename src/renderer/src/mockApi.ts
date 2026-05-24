@@ -501,6 +501,7 @@ export function installMockApiWhenMissing(): void {
     closeWindow: async () => {
       document.body.classList.toggle("preview-closed");
     },
-    onRunEvent: () => () => undefined
+    onRunEvent: () => () => undefined,
+    onUpdateStatus: () => () => undefined
   } satisfies SkillSpaceApi;
 }

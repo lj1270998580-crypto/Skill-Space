@@ -5175,6 +5175,7 @@ function setUpdateStatus(next: Partial<UpdateStatus>): UpdateStatus {
     currentVersion: app.getVersion(),
     ...next
   };
+  mainWindow?.webContents.send("skillspace:update-status-changed", updateStatus);
   return updateStatus;
 }
 
@@ -5203,11 +5204,33 @@ function stringifyReleaseNotes(notes: unknown): string | undefined {
   return String(notes);
 }
 
+function defaultReleaseNotes(version?: string): string {
+  if (version === "0.1.25") {
+    return [
+      "Skill-Space 0.1.25",
+      "- 修复在线更新下载缺少实时反馈的问题。",
+      "- 更新弹窗现在会保留并显示下载状态、完成状态或错误信息。",
+      "- 修复同 ID 本地模板遮挡云端模板，导致云端库显示 0 的问题。",
+      "- 云端工作流库刷新会绕过缓存，优先展示服务器模板。"
+    ].join("\n");
+  }
+  if (version === "0.1.24") {
+    return [
+      "Skill-Space 0.1.24",
+      "- 修复工作流上传后云端库显示为空的问题。",
+      "- 智能体扫描改为手动触发，不再进入页面自动弹窗。",
+      "- 优化中等窗口布局和智能体扫描弹窗视觉。"
+    ].join("\n");
+  }
+  return version ? `Skill-Space ${version} 更新。` : "Skill-Space 更新。";
+}
+
 function updateReleaseFields(info: { version?: string; releaseName?: string | null; releaseNotes?: unknown; releaseDate?: string | null }): Partial<UpdateStatus> {
+  const releaseNotes = stringifyReleaseNotes(info.releaseNotes);
   return {
     availableVersion: info.version,
     releaseName: info.releaseName ?? undefined,
-    releaseNotes: stringifyReleaseNotes(info.releaseNotes),
+    releaseNotes: releaseNotes || defaultReleaseNotes(info.version),
     releaseDate: info.releaseDate ?? undefined
   };
 }
@@ -5355,9 +5378,17 @@ async function downloadUpdate(): Promise<UpdateStatus> {
     return markNoNewerUpdate(updateStatus.availableVersion);
   }
 
-  setUpdateStatus({ state: "downloading", detail: "正在下载更新..." });
-  await autoUpdater.downloadUpdate();
-  return updateStatus;
+  try {
+    setUpdateStatus({ state: "downloading", detail: "正在下载更新..." });
+    await autoUpdater.downloadUpdate();
+    return updateStatus;
+  } catch (error) {
+    return setUpdateStatus({
+      state: "error",
+      detail: "下载更新失败。",
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
 }
 async function installUpdate(): Promise<void> {
   autoUpdater.quitAndInstall(false, true);

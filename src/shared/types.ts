@@ -529,4 +529,5 @@ export interface SkillSpaceApi {
   toggleMaximizeWindow(): Promise<void>;
   closeWindow(): Promise<void>;
   onRunEvent(callback: (event: RunEvent) => void): () => void;
+  onUpdateStatus(callback: (status: UpdateStatus) => void): () => void;
 }

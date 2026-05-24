@@ -1297,6 +1297,10 @@ textarea:focus-visible {
   color: rgba(22, 33, 44, 0.66);
 }
 
+.update-summary .danger-copy {
+  color: #b6473f;
+}
+
 .update-notes {
   display: grid;
   gap: 8px;
