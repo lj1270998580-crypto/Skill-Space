@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, safeStorage, shell, Tray, type OpenDialogOptions } from "electron";
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { cp, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
@@ -34,6 +34,8 @@ import type {
   PublishTemplateResponse,
   PublishTemplateVariable,
   ShareTemplateResponse,
+  SkillTemplateDependency,
+  TemplatePackageFile,
   FeishuDecisionLogEntry,
   RunEvent,
   RunArtifact,
@@ -58,6 +60,13 @@ const nodeRequire = createRequire(import.meta.url);
 const { autoUpdater } = nodeRequire("electron-updater") as typeof import("electron-updater");
 const legacyConfigPath = "D:\\Skill-Space\\config\\skillspace.config.json";
 const marketplaceCatalogUrl = "https://ailabing.cn/downloads/skill-space/templates/catalog.json";
+const marketplaceUploadUrl = "https://ailabing.cn/api/skill-space/templates/upload";
+const marketplaceDeleteUrl = "https://ailabing.cn/api/skill-space/templates/delete";
+
+type UploadedTemplateState = {
+  ids: Set<string>;
+  tokens: Map<string, string>;
+};
 
 function defaultDataRoot(): string {
   if (process.platform === "win32") {
@@ -78,6 +87,10 @@ function isPathInside(parent: string, target: string, allowEqual = false): boole
   }
   const distance = relative(resolvedParent, resolvedTarget);
   return Boolean(distance) && !distance.startsWith("..") && !isAbsolute(distance);
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function bundledResourcePath(fileName: string): string {
@@ -365,6 +378,10 @@ function marketplaceCatalogPath(config: SkillSpaceConfig): string {
 
 function marketplaceShareRoot(config: SkillSpaceConfig): string {
   return join(marketplaceRoot(config), "share");
+}
+
+function marketplaceUploadedPath(config: SkillSpaceConfig): string {
+  return join(marketplaceRoot(config), "uploaded.json");
 }
 
 function backgroundSchedulerScriptPath(config: SkillSpaceConfig): string {
@@ -665,16 +682,16 @@ async function checkAgent(id: AgentId, agent: AgentConfig): Promise<AgentHealth>
 }
 
 function normalizeAgentDetail(id: AgentId, output: string, online: boolean): string {
-  const singleLine = output.replace(/\s+/g, " ").trim();
-  const invalidCount = (singleLine.match(/[锟解枴]/g) ?? []).length;
-  if (!singleLine || invalidCount > 2) {
-    if (online) {
-      return id === "hermes" ? "WSL Hermes Agent ready" : "Agent ready";
-    }
-    return "No readable version output.";
+  const cleanedLine = output
+    .replace(/\u0000/g, "")
+    .replace(/[\u0001-\u001f\u007f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const unreadableCount = (cleanedLine.match(/[\u95bf\u7199\u8a12\u0412\u93cb\u78b7\ufffd\u25a1]/g) ?? []).length;
+  if (!cleanedLine || unreadableCount > 2) {
+    return online ? (id === "hermes" ? "WSL Hermes Agent ready" : "Agent ready") : "No readable version output.";
   }
-
-  return singleLine.slice(0, 180);
+  return cleanedLine.slice(0, 180);
 }
 async function checkAgents(config: SkillSpaceConfig): Promise<AgentHealth[]> {
   const ids = Object.keys(config.agents) as AgentId[];
@@ -2118,6 +2135,7 @@ function nextTemplateVariable(
     placeholder: `{{${kind}.${key}}}`,
     example
   };
+  variable.label = kind === "path" ? "本地路径" : kind === "secret" ? "密钥或令牌" : "文本配置";
   variables.set(variable.placeholder, variable);
   return variable;
 }
@@ -2155,6 +2173,16 @@ function sanitizePublishText(
     warnings.push(`已替换疑似敏感配置：${variable.placeholder}`);
     return match.replace(/[:=]\s*["']?.*$/s, `= ${variable.placeholder}`);
   });
+
+  nextText = nextText.replace(
+    /^(\s*(?:公众号名称|公众号|账号|账户|App\s*ID|App\s*Secret|API\s*Key|Token|Secret|Password|密钥|令牌)\s*[:：=]\s*)(.+)$/gim,
+    (match, prefix: string, value: string) => {
+      const kind: PublishTemplateVariable["kind"] = /secret|password|token|key|密钥|令牌/i.test(prefix) ? "secret" : "text";
+      const variable = nextTemplateVariable(variables, kind, value.trim().slice(0, 60));
+      warnings.push(`已模板化敏感配置：${variable.placeholder}`);
+      return `${prefix}${variable.placeholder}`;
+    }
+  );
 
   return nextText;
 }
@@ -2253,12 +2281,163 @@ async function copyPublishTemplateFiles(
   return { filesProcessed, filesCopied };
 }
 
+async function readPublishTextCorpus(root: string): Promise<string> {
+  const files = await listSkillFiles(root);
+  const chunks: string[] = [];
+  for (const file of files) {
+    if (file.kind !== "file" || !isPublishTextFile(file.path, file.size)) {
+      continue;
+    }
+    if (file.path.startsWith(".git/") || file.path.includes("/node_modules/")) {
+      continue;
+    }
+    const sourcePath = join(root, file.path);
+    if (isPathInside(root, sourcePath, true)) {
+      chunks.push(await readFile(sourcePath, "utf8"));
+    }
+  }
+  return chunks.join("\n\n");
+}
+
+function hasSkillReference(corpus: string, skill: SkillSummary): boolean {
+  const haystack = corpus.toLowerCase();
+  const needles = [skill.id, skill.name, ...skill.tags].map((item) => item.toLowerCase()).filter((item) => item.length > 2);
+  return needles.some((needle) => new RegExp(`(^|[^a-z0-9_-])${escapeRegex(needle)}([^a-z0-9_-]|$)`, "i").test(haystack));
+}
+
+async function collectSkillDependencies(
+  config: SkillSpaceConfig,
+  sourceSkill: SkillSummary,
+  targetRoot: string,
+  variables: Map<string, PublishTemplateVariable>,
+  warnings: string[]
+): Promise<{ dependencies: SkillTemplateDependency[]; filesProcessed: number; filesCopied: number }> {
+  const allSkills = await scanSkills(config);
+  const byId = new Map(allSkills.map((skill) => [skill.id, skill]));
+  const queue: Array<{ skill: SkillSummary; depth: number; reason: string }> = [];
+  const declared = await readOptionalJson<{ dependencies?: Array<{ id?: string; reason?: string }> }>(
+    join(sourceSkill.root, ".skillspace", "dependencies.json")
+  );
+  for (const dependency of declared?.dependencies ?? []) {
+    if (!dependency.id || dependency.id === sourceSkill.id) {
+      continue;
+    }
+    const skill = byId.get(dependency.id);
+    if (skill) {
+      queue.push({ skill, depth: 1, reason: dependency.reason || `Declared dependency: ${dependency.id}` });
+    } else {
+      warnings.push(`Declared dependency was not found locally and cannot be bundled: ${dependency.id}.`);
+    }
+  }
+
+  const corpus = await readPublishTextCorpus(sourceSkill.root);
+  for (const candidate of allSkills) {
+    if (candidate.id !== sourceSkill.id && resolve(candidate.root) !== resolve(sourceSkill.root) && hasSkillReference(corpus, candidate)) {
+      queue.push({ skill: candidate, depth: 1, reason: `Referenced by ${sourceSkill.id}` });
+    }
+  }
+
+  const dependencies: SkillTemplateDependency[] = [];
+  const visited = new Set<string>();
+  let filesProcessed = 0;
+  let filesCopied = 0;
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (!current || visited.has(current.skill.id) || current.skill.id === sourceSkill.id) {
+      continue;
+    }
+    visited.add(current.skill.id);
+    const bundledPath = `references/bundled-skills/${current.skill.id}`;
+    const bundledRoot = join(targetRoot, bundledPath);
+    await rm(bundledRoot, { recursive: true, force: true });
+    const copied = await copyPublishTemplateFiles(current.skill.root, bundledRoot, config, variables, warnings);
+    await ensureSkillSpaceManifest(bundledRoot);
+    filesProcessed += copied.filesProcessed;
+    filesCopied += copied.filesCopied;
+    dependencies.push({
+      id: current.skill.id,
+      name: current.skill.name,
+      version: current.skill.version,
+      reason: current.reason,
+      bundledPath
+    });
+  }
+  return { dependencies, filesProcessed, filesCopied };
+}
+
+async function detectTemplateRequirements(
+  packageRoot: string,
+  variables: PublishTemplateVariable[],
+  dependencies: SkillTemplateDependency[]
+): Promise<Record<string, unknown>> {
+  const corpus = (await readPublishTextCorpus(packageRoot)).toLowerCase();
+  const cliCandidates = ["node", "npm", "pnpm", "python", "uv", "git", "md2wechat", "wsl", "docker", "ffmpeg", "claude", "codex", "openclaw"];
+  const cliTools = cliCandidates.filter((tool) => new RegExp(`(^|[^a-z0-9_-])${escapeRegex(tool)}([^a-z0-9_-]|$)`, "i").test(corpus));
+  const serviceCandidates = [
+    { id: "feishu", keywords: ["飞书", "lark", "feishu"] },
+    { id: "wechat", keywords: ["微信公众号", "微信", "wechat", "md2wechat"] },
+    { id: "openai", keywords: ["openai", "gpt", "api_key", "api key"] },
+    { id: "aliyun", keywords: ["阿里云", "aliyun", "oss"] },
+    { id: "github", keywords: ["github", "git"] }
+  ];
+  const externalServices = serviceCandidates
+    .filter((service) => service.keywords.some((keyword) => corpus.includes(keyword.toLowerCase())))
+    .map((service) => service.id);
+  return {
+    schemaVersion: "skillspace.requirements.v1",
+    generatedAt: new Date().toISOString(),
+    bundledDependencies: dependencies.map((dependency) => ({
+      id: dependency.id,
+      version: dependency.version,
+      path: dependency.bundledPath,
+      reason: dependency.reason
+    })),
+    requiredConfiguration: variables.map((variable) => ({
+      key: variable.key,
+      label: variable.label,
+      kind: variable.kind,
+      placeholder: variable.placeholder,
+      example: variable.example ?? ""
+    })),
+    externalServices: Array.from(new Set(externalServices)),
+    cliTools: Array.from(new Set(cliTools))
+  };
+}
+
 function runSummaryPath(config: SkillSpaceConfig, runId: string): string {
   return join(config.runsRoot, runId, "run.json");
 }
 
 async function writeRunSummary(summary: RunSummary): Promise<void> {
   await writeFile(join(summary.runRoot, "run.json"), `${JSON.stringify(summary, null, 2)}\n`, "utf8");
+}
+
+async function normalizeRunSummaryFromLog(run: RunSummary): Promise<RunSummary> {
+  if (run.status !== "waiting_input" || !run.endedAt || run.exitCode !== 0 || !existsSync(run.logPath)) {
+    return run;
+  }
+
+  try {
+    if (!isPathInside(run.runRoot, run.logPath)) {
+      return run;
+    }
+    const lines = (await readFile(run.logPath, "utf8")).split(/\r?\n/).filter(Boolean);
+    const assistantMessages: string[] = [];
+    for (const line of lines) {
+      const event = JSON.parse(line) as RunEvent;
+      if (event.type === "assistant" && event.message) {
+        assistantMessages.push(event.message);
+      }
+    }
+    const finalAssistantMessage = assistantMessages.at(-1);
+    if (finalAssistantMessage && !isUserDecisionRequest(finalAssistantMessage)) {
+      return { ...run, status: "completed", lastMessage: finalAssistantMessage };
+    }
+  } catch {
+    return run;
+  }
+
+  return run;
 }
 
 async function listRuns(config: SkillSpaceConfig): Promise<RunSummary[]> {
@@ -2270,14 +2449,17 @@ async function listRuns(config: SkillSpaceConfig): Promise<RunSummary[]> {
       .map((entry) => readJsonFile<RunSummary>(runSummaryPath(config, entry.name)))
   );
 
-  return runs
-    .filter((run): run is RunSummary => Boolean(run))
-    .map((run) =>
-      run.status === "waiting_input" && run.endedAt && run.lastMessage && !isUserDecisionRequest(run.lastMessage)
-        ? { ...run, status: "completed" as const }
-        : run
-    )
-    .sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+  const normalizedRuns = await Promise.all(
+    runs
+      .filter((run): run is RunSummary => Boolean(run))
+      .map((run) =>
+        run.status === "waiting_input" && run.endedAt && run.lastMessage && !isUserDecisionRequest(run.lastMessage)
+          ? { ...run, status: "completed" as const }
+          : normalizeRunSummaryFromLog(run)
+      )
+  );
+
+  return normalizedRuns.sort((a, b) => b.startedAt.localeCompare(a.startedAt));
 }
 
 async function deleteRun(config: SkillSpaceConfig, runId: string): Promise<{ deleted: boolean }> {
@@ -2522,6 +2704,7 @@ async function getSkillDetail(config: SkillSpaceConfig, skillId: string): Promis
     workflowText: await readTextFile(metadataPath("workflow", ".skillspace/workflow.yaml")),
     inputSchema: await readOptionalJson(metadataPath("inputSchema", ".skillspace/inputs.schema.json")),
     outputSchema: await readOptionalJson(metadataPath("outputSchema", ".skillspace/outputs.schema.json")),
+    installConfig: await readOptionalJson(join(skill.root, ".skillspace", "install-config.json")),
     permissions: await readOptionalJson(metadataPath("permissions", ".skillspace/permissions.json")),
     adapters: await readOptionalJson(metadataPath("adapters", ".skillspace/adapters.json")),
     files: await listSkillFiles(skill.root)
@@ -2547,10 +2730,18 @@ async function prepareSkillPackage(config: SkillSpaceConfig, skillId: string): P
   const variables = new Map<string, PublishTemplateVariable>();
   const warnings: string[] = [];
   const copied = await copyPublishTemplateFiles(skill.root, targetRoot, config, variables, warnings);
+  const dependencyBundle = await collectSkillDependencies(config, skill, targetRoot, variables, warnings);
   const existingInputSchema = await readOptionalJson(join(targetRoot, ".skillspace", "inputs.schema.json"));
   const variableList = mergeTemplateVariables([...variables.values(), ...inputSchemaVariables(existingInputSchema)]);
+  const requirements = await detectTemplateRequirements(targetRoot, variableList, dependencyBundle.dependencies);
   const metadataRoot = join(targetRoot, ".skillspace");
   await mkdir(metadataRoot, { recursive: true });
+  await writeJsonFile(join(metadataRoot, "dependencies.json"), {
+    schemaVersion: "skillspace.dependencies.v1",
+    generatedAt: new Date().toISOString(),
+    dependencies: dependencyBundle.dependencies
+  });
+  await writeJsonFile(join(metadataRoot, "requirements.json"), requirements);
 
   const manifestPath = join(metadataRoot, "publish.json");
   await writeJsonFile(manifestPath, {
@@ -2564,7 +2755,9 @@ async function prepareSkillPackage(config: SkillSpaceConfig, skillId: string): P
     preparedAt: new Date().toISOString(),
     template: {
       variables: variableList,
-      inputSchema: ".skillspace/inputs.schema.json"
+      inputSchema: ".skillspace/inputs.schema.json",
+      dependencies: ".skillspace/dependencies.json",
+      requirements: ".skillspace/requirements.json"
     },
     safety: {
       status: warnings.length > 0 ? "review_required" : "ready",
@@ -2607,9 +2800,11 @@ async function prepareSkillPackage(config: SkillSpaceConfig, skillId: string): P
     packageRoot: targetRoot,
     manifestPath,
     variables: variableList,
+    dependencies: dependencyBundle.dependencies,
+    requirements,
     warnings,
-    filesProcessed: copied.filesProcessed,
-    filesCopied: copied.filesCopied
+    filesProcessed: copied.filesProcessed + dependencyBundle.filesProcessed,
+    filesCopied: copied.filesCopied + dependencyBundle.filesCopied
   };
 }
 
@@ -2675,6 +2870,32 @@ async function ensureSkillSpaceManifest(skillRoot: string): Promise<void> {
     )}\n`,
     "utf8"
   );
+}
+
+function bumpPatchVersion(value: unknown): string {
+  const parts = String(value ?? "0.1.0")
+    .split(".")
+    .map((part) => Number.parseInt(part.replace(/\D+/g, ""), 10));
+  const major = Number.isFinite(parts[0]) ? parts[0] : 0;
+  const minor = Number.isFinite(parts[1]) ? parts[1] : 1;
+  const patch = Number.isFinite(parts[2]) ? parts[2] : 0;
+  return `${major}.${minor}.${patch + 1}`;
+}
+
+async function bumpSkillManifestVersion(skillRoot: string, reason: string): Promise<string> {
+  const manifestPath = join(skillRoot, ".skillspace", "manifest.json");
+  const manifest = (await readJsonFile<Record<string, unknown>>(manifestPath)) ?? {};
+  const nextVersion = bumpPatchVersion(manifest.version);
+  await writeJsonFile(manifestPath, {
+    ...manifest,
+    version: nextVersion,
+    updatedAt: new Date().toISOString(),
+    versionBump: {
+      reason,
+      bumpedAt: new Date().toISOString()
+    }
+  });
+  return nextVersion;
 }
 
 function psSingleQuote(value: string): string {
@@ -2900,6 +3121,59 @@ async function writeLocalMarketplaceTemplates(config: SkillSpaceConfig, template
   await writeJsonFile(marketplaceCatalogPath(config), templates);
 }
 
+async function readUploadedTemplateState(config: SkillSpaceConfig): Promise<UploadedTemplateState> {
+  const parsed = await readOptionalJson(marketplaceUploadedPath(config));
+  if (Array.isArray(parsed)) {
+    return {
+      ids: new Set(parsed.filter((id): id is string => typeof id === "string" && Boolean(id.trim()))),
+      tokens: new Map()
+    };
+  }
+  if (parsed && typeof parsed === "object") {
+    const record = parsed as { ids?: unknown; tokens?: unknown };
+    const ids = Array.isArray(record.ids)
+      ? record.ids.filter((id): id is string => typeof id === "string" && Boolean(id.trim()))
+      : [];
+    const tokens = record.tokens && typeof record.tokens === "object" && !Array.isArray(record.tokens)
+      ? Object.entries(record.tokens as Record<string, unknown>)
+          .filter((entry): entry is [string, string] => typeof entry[1] === "string" && Boolean(entry[1].trim()))
+      : [];
+    return {
+      ids: new Set([...ids, ...tokens.map(([id]) => id)]),
+      tokens: new Map(tokens)
+    };
+  }
+  return { ids: new Set(), tokens: new Map() };
+}
+
+async function writeUploadedTemplateState(config: SkillSpaceConfig, state: UploadedTemplateState): Promise<void> {
+  await writeJsonFile(marketplaceUploadedPath(config), {
+    schemaVersion: "skillspace.marketplace.uploaded.v2",
+    ids: Array.from(state.ids).sort(),
+    tokens: Object.fromEntries(Array.from(state.tokens.entries()).sort(([left], [right]) => left.localeCompare(right)))
+  });
+}
+
+async function rememberUploadedTemplate(config: SkillSpaceConfig, templateId: string, deleteToken?: string): Promise<void> {
+  const state = await readUploadedTemplateState(config);
+  state.ids.add(templateId);
+  if (deleteToken?.trim()) {
+    state.tokens.set(templateId, deleteToken.trim());
+  }
+  await writeUploadedTemplateState(config, state);
+}
+
+async function uploadedTemplateDeleteToken(config: SkillSpaceConfig, templateId: string): Promise<string | undefined> {
+  return (await readUploadedTemplateState(config)).tokens.get(templateId);
+}
+
+async function forgetUploadedTemplate(config: SkillSpaceConfig, templateId: string): Promise<void> {
+  const state = await readUploadedTemplateState(config);
+  state.ids.delete(templateId);
+  state.tokens.delete(templateId);
+  await writeUploadedTemplateState(config, state);
+}
+
 async function migrateLocalMarketplaceTemplates(config: SkillSpaceConfig): Promise<SkillTemplateListing[]> {
   const templates = await readLocalMarketplaceTemplates(config);
   let changed = false;
@@ -2932,7 +3206,7 @@ async function migrateLocalMarketplaceTemplates(config: SkillSpaceConfig): Promi
 
 async function fetchRemoteMarketplaceTemplates(): Promise<SkillTemplateListing[]> {
   try {
-    const response = await fetch(marketplaceCatalogUrl, { cache: "no-store" });
+    const response = await fetch(`${marketplaceCatalogUrl}?t=${Date.now()}`, { cache: "no-store" });
     if (!response.ok) {
       return [];
     }
@@ -2972,11 +3246,15 @@ async function listMarketplaceTemplates(config: SkillSpaceConfig, includeRemote 
   const localTemplates = await migrateLocalMarketplaceTemplates(config);
   const remoteTemplates = includeRemote ? await fetchRemoteMarketplaceTemplates() : [];
   const installedIds = await installedTemplateIds(config);
+  const uploadedState = await readUploadedTemplateState(config);
+  const localById = new Map(localTemplates.map((template) => [template.id, template]));
+  const remoteIds = new Set(remoteTemplates.map((template) => template.id));
   const seen = new Set<string>();
+  const builtInTemplates = process.env.SKILL_SPACE_SHOW_BUILTIN_TEMPLATES === "1" ? marketplaceTemplates : [];
   return [
-    ...localTemplates,
     ...remoteTemplates,
-    ...marketplaceTemplates
+    ...localTemplates,
+    ...builtInTemplates
   ]
     .filter((template) => {
       if (seen.has(template.id)) {
@@ -2987,7 +3265,10 @@ async function listMarketplaceTemplates(config: SkillSpaceConfig, includeRemote 
     })
     .map((template) => ({
       ...template,
-      installed: installedIds.has(template.id)
+      packageRoot: template.packageRoot ?? localById.get(template.id)?.packageRoot,
+      installed: installedIds.has(template.id),
+      uploaded: uploadedState.ids.has(template.id) || Boolean(template.uploaded) || (template.source === "local" && remoteIds.has(template.id)),
+      deleteTokenStored: uploadedState.tokens.has(template.id)
     }))
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
@@ -2998,10 +3279,12 @@ async function publishSkillTemplate(config: SkillSpaceConfig, skillId: string): 
   await rm(packageRoot, { recursive: true, force: true });
   await mkdir(dirname(packageRoot), { recursive: true });
   await cp(prepared.packageRoot, packageRoot, { recursive: true, force: true });
+  const safeName = sanitizeTemplateListingText(prepared.skill.name, prepared.skill.tags[0]);
+  const safeDescription = sanitizeTemplateListingText(prepared.skill.description, prepared.skill.tags[0]);
   const template: SkillTemplateListing = {
     id: prepared.skill.id,
-    name: prepared.skill.name,
-    description: prepared.skill.description,
+    name: safeName,
+    description: safeDescription,
     version: prepared.skill.version,
     author: "Local",
     category: prepared.skill.tags[0] ?? "SkillOps",
@@ -3009,6 +3292,8 @@ async function publishSkillTemplate(config: SkillSpaceConfig, skillId: string): 
     rating: 0,
     runtimes: prepared.skill.runtimes,
     requiredVariables: prepared.variables,
+    dependencies: prepared.dependencies,
+    requirements: prepared.requirements,
     safetyStatus: prepared.warnings.length > 0 ? "review_required" : "ready",
     updatedAt: new Date().toISOString(),
     source: "local",
@@ -3027,6 +3312,24 @@ async function publishSkillTemplate(config: SkillSpaceConfig, skillId: string): 
     warnings: prepared.warnings,
     message: `已加入本地工作流库：${template.name}`
   };
+}
+
+function sanitizeTemplateListingText(value: string, tag?: string): string {
+  const cleaned = value
+    .replace(/[A-Za-z]:\\[^\s`"'<>|]+/g, "{{path.local}}")
+    .replace(/\/(?:Users|home)\/[^\s`"'<>|]+/g, "{{path.local}}")
+    .replace(/[\p{Script=Han}A-Za-z0-9_-]{2,24}(?=公众号)/gu, "")
+    .replace(/[\p{Script=Han}A-Za-z0-9_-]{2,24}(?=(?:账号|账户))/gu, "")
+    .replace(/\b(?:sk-[A-Za-z0-9_-]{12,}|sk-proj-[A-Za-z0-9_-]{12,}|AKIA[0-9A-Z]{12,})\b/g, "{{secret.token}}")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (cleaned.length >= 4) {
+    return cleaned.slice(0, 180);
+  }
+  if (tag) {
+    return `${tag}工作流模板`;
+  }
+  return "通用工作流模板";
 }
 
 async function deleteMarketplaceTemplate(config: SkillSpaceConfig, templateId: string): Promise<DeleteTemplateResponse> {
@@ -3050,6 +3353,131 @@ async function deleteMarketplaceTemplate(config: SkillSpaceConfig, templateId: s
   return { deleted: true, message: `已从本地工作流库删除：${template.name}` };
 }
 
+function isSafePackageRelativePath(pathValue: string): boolean {
+  const normalized = pathValue.replace(/\\/g, "/");
+  return Boolean(normalized) && !normalized.startsWith("/") && !normalized.includes("..") && !/^[A-Za-z]:/.test(normalized);
+}
+
+async function readTemplatePackageFiles(packageRoot: string): Promise<TemplatePackageFile[]> {
+  const files = await listSkillFiles(packageRoot);
+  const packageFiles: TemplatePackageFile[] = [];
+  let totalBytes = 0;
+  for (const file of files) {
+    if (file.kind !== "file" || !isSafePackageRelativePath(file.path)) {
+      continue;
+    }
+    if (file.path.startsWith(".git/") || file.path.includes("/node_modules/")) {
+      continue;
+    }
+    const sourcePath = join(packageRoot, file.path);
+    if (!isPathInside(packageRoot, sourcePath, true)) {
+      continue;
+    }
+    const encoding: TemplatePackageFile["encoding"] = isPublishTextFile(file.path, file.size) ? "utf8" : "base64";
+    const content = encoding === "utf8" ? await readFile(sourcePath, "utf8") : (await readFile(sourcePath)).toString("base64");
+    totalBytes += Buffer.byteLength(content, "utf8");
+    if (totalBytes > 6_000_000) {
+      throw new Error("Template package is too large for online sharing.");
+    }
+    packageFiles.push({ path: file.path, content, encoding });
+  }
+  return packageFiles.slice(0, 320);
+}
+
+async function writeTemplatePackageFiles(
+  targetRoot: string,
+  packageFiles: TemplatePackageFile[],
+  variables: Record<string, string>
+): Promise<void> {
+  for (const file of packageFiles) {
+    if (!isSafePackageRelativePath(file.path)) {
+      continue;
+    }
+    const targetPath = join(targetRoot, file.path);
+    if (!isPathInside(targetRoot, targetPath, true)) {
+      continue;
+    }
+    await mkdir(dirname(targetPath), { recursive: true });
+    if (file.encoding === "base64") {
+      await writeFile(targetPath, Buffer.from(file.content, "base64"));
+    } else {
+      await writeFile(targetPath, applyTemplateVariablesToText(file.content, variables), "utf8");
+    }
+  }
+}
+
+function sha256Buffer(buffer: Buffer): string {
+  return createHash("sha256").update(buffer).digest("hex");
+}
+
+async function fetchTemplatePackageFiles(template: SkillTemplateListing): Promise<TemplatePackageFile[] | undefined> {
+  if (template.packageFiles?.length) {
+    return template.packageFiles;
+  }
+  if (!template.packageUrl) {
+    return undefined;
+  }
+  const response = await fetch(template.packageUrl, { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(`Template package download failed: HTTP ${response.status}`);
+  }
+  const body = Buffer.from(await response.arrayBuffer());
+  if (template.packageSha256 && sha256Buffer(body) !== template.packageSha256) {
+    throw new Error("Template package checksum mismatch.");
+  }
+  const parsed = JSON.parse(body.toString("utf8")) as {
+    packageFiles?: TemplatePackageFile[];
+    template?: { packageFiles?: TemplatePackageFile[] };
+  };
+  const packageFiles = parsed.template?.packageFiles ?? parsed.packageFiles;
+  if (!Array.isArray(packageFiles) || packageFiles.length === 0) {
+    throw new Error("Template package has no installable files.");
+  }
+  return packageFiles;
+}
+
+async function uploadTemplateToRemote(template: SkillTemplateListing): Promise<{ uploaded: boolean; message: string; deleteToken?: string }> {
+  const response = await fetch(marketplaceUploadUrl, {
+    method: "POST",
+    headers: { "content-type": "application/json; charset=utf-8" },
+    body: JSON.stringify({ template })
+  });
+  const parsed = await response.json().catch(() => undefined) as { ok?: boolean; message?: string; deleteToken?: string } | undefined;
+  if (!response.ok || !parsed?.ok) {
+    return { uploaded: false, message: parsed?.message || `Server rejected upload: HTTP ${response.status}` };
+  }
+  return {
+    uploaded: true,
+    message: parsed.message || "Template uploaded to the online workflow library.",
+    deleteToken: parsed.deleteToken
+  };
+}
+
+async function deleteTemplateFromRemote(templateId: string, deleteToken?: string): Promise<{ deleted: boolean; message: string }> {
+  const response = await fetch(marketplaceDeleteUrl, {
+    method: "POST",
+    headers: { "content-type": "application/json; charset=utf-8" },
+    body: JSON.stringify({ templateId, deleteToken })
+  });
+  const parsed = await response.json().catch(() => undefined) as { ok?: boolean; deleted?: boolean; message?: string } | undefined;
+  if (!response.ok || !parsed?.ok) {
+    return { deleted: false, message: parsed?.message || `Server rejected delete: HTTP ${response.status}` };
+  }
+  return { deleted: Boolean(parsed.deleted), message: parsed.message || "Online template deleted." };
+}
+
+async function deleteUploadedMarketplaceTemplate(config: SkillSpaceConfig, templateId: string): Promise<DeleteTemplateResponse> {
+  const deleteToken = await uploadedTemplateDeleteToken(config, templateId);
+  if (!deleteToken) {
+    return { deleted: false, message: "Cannot delete this online template because this device does not have its delete token." };
+  }
+  const result = await deleteTemplateFromRemote(templateId, deleteToken);
+  if (result.deleted) {
+    await forgetUploadedTemplate(config, templateId);
+  }
+  return result;
+}
+
 async function shareMarketplaceTemplate(config: SkillSpaceConfig, templateId: string): Promise<ShareTemplateResponse> {
   const template = (await listMarketplaceTemplates(config, false)).find((item) => item.id === templateId);
   if (!template) {
@@ -3067,6 +3495,7 @@ async function shareMarketplaceTemplate(config: SkillSpaceConfig, templateId: st
     source: "remote",
     packageRoot: undefined,
     installed: undefined,
+    uploaded: undefined,
     requiredVariables: template.requiredVariables.map((variable) => ({ ...variable }))
   };
 
@@ -3080,6 +3509,13 @@ async function shareMarketplaceTemplate(config: SkillSpaceConfig, templateId: st
     if (skillMarkdown) {
       onlineTemplate.templateMarkdown = skillMarkdown;
     }
+    onlineTemplate.packageFiles = await readTemplatePackageFiles(packageRoot);
+    onlineTemplate.dependencies =
+      (await readOptionalJson<{ dependencies?: SkillTemplateDependency[] }>(join(packageRoot, ".skillspace", "dependencies.json")))?.dependencies ??
+      template.dependencies;
+    onlineTemplate.requirements =
+      (await readOptionalJson<Record<string, unknown>>(join(packageRoot, ".skillspace", "requirements.json"))) ??
+      template.requirements;
   }
 
   const catalogPath = join(shareRoot, "catalog.json");
@@ -3091,15 +3527,28 @@ async function shareMarketplaceTemplate(config: SkillSpaceConfig, templateId: st
   await writeJsonFile(join(shareRoot, "README.upload.json"), {
     purpose: "Upload this folder or merge catalog.json into the online Skill-Space workflow library.",
     catalogUrl: marketplaceCatalogUrl,
+    uploadUrl: marketplaceUploadUrl,
     templateId: template.id,
     note: "Runtime configuration fields are kept. Local path variables are hidden by Skill-Space and auto-filled on install."
   });
+  const uploadResult = await uploadTemplateToRemote(onlineTemplate).catch((error) => ({
+    uploaded: false,
+    message: error instanceof Error ? error.message : String(error),
+    deleteToken: undefined
+  }));
+  if (uploadResult.uploaded) {
+    await rememberUploadedTemplate(config, template.id, uploadResult.deleteToken);
+  }
 
   return {
     shared: true,
+    uploaded: uploadResult.uploaded,
     packageRoot: shareRoot,
     catalogPath,
-    message: `分享包已生成：${shareRoot}`
+    deleteTokenSaved: Boolean(uploadResult.deleteToken),
+    message: uploadResult.uploaded
+      ? `已上传到云端工作流库，并已生成本地发布包：${shareRoot}`
+      : `本地发布包已生成，但云端上传失败：${uploadResult.message}。发布包位置：${shareRoot}`
   };
 }
 
@@ -3137,6 +3586,50 @@ async function copyTemplatePackageToSkill(
   }
 }
 
+async function installBundledDependencies(
+  config: SkillSpaceConfig,
+  installedRoot: string,
+  variables: Record<string, string>
+): Promise<{ installed: SkillSummary[]; warnings: string[] }> {
+  const bundledRoot = join(installedRoot, "references", "bundled-skills");
+  const bundledStat = await stat(bundledRoot).catch(() => null);
+  if (!bundledStat?.isDirectory()) {
+    return { installed: [], warnings: [] };
+  }
+
+  const existingSkills = await scanSkills(config);
+  const existingById = new Map(existingSkills.map((skill) => [skill.id, skill]));
+  const entries = await readdir(bundledRoot, { withFileTypes: true });
+  const installed: SkillSummary[] = [];
+  const warnings: string[] = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) {
+      continue;
+    }
+    const sourceRoot = join(bundledRoot, entry.name);
+    const dependency = await scanSkillFolder(sourceRoot);
+    if (!dependency) {
+      continue;
+    }
+    const existing = existingById.get(dependency.id);
+    if (existing) {
+      if (existing.version !== dependency.version) {
+        warnings.push(`Bundled dependency ${dependency.name} was not overwritten: installed ${existing.version}, bundled ${dependency.version}.`);
+      }
+      continue;
+    }
+    const destination = await uniqueSkillRoot(config, dependency.id);
+    await copyTemplatePackageToSkill(sourceRoot, destination, variables);
+    await ensureSkillSpaceManifest(destination);
+    const installedDependency = await scanSkillFolder(destination);
+    if (installedDependency) {
+      existingById.set(installedDependency.id, installedDependency);
+      installed.push(installedDependency);
+    }
+  }
+  return { installed, warnings };
+}
+
 function applyTemplateVariablesToText(text: string, variables: Record<string, string>): string {
   return Object.entries(variables).reduce((current, [key, value]) => {
     return current
@@ -3145,6 +3638,32 @@ function applyTemplateVariablesToText(text: string, variables: Record<string, st
       .split(`{{text.${key}}}`).join(value)
       .split(`{{${key}}}`).join(value);
   }, text);
+}
+
+async function writeInstalledTemplateConfig(
+  destination: string,
+  template: SkillTemplateListing,
+  variables: Record<string, string>
+): Promise<void> {
+  const required = template.requiredVariables.filter((variable) => variable.kind !== "path");
+  if (required.length === 0) {
+    return;
+  }
+  await writeJsonFile(join(destination, ".skillspace", "install-config.json"), {
+    schemaVersion: "skillspace.install-config.v1",
+    templateId: template.id,
+    installedAt: new Date().toISOString(),
+    configured: required.every((variable) => {
+      const value = variables[variable.key]?.trim();
+      return Boolean(value && value !== variable.placeholder);
+    }),
+    requiredVariables: required.map((variable) => ({
+      key: variable.key,
+      label: variable.label,
+      kind: variable.kind,
+      placeholder: variable.placeholder
+    }))
+  });
 }
 
 async function installMarketplaceTemplate(config: SkillSpaceConfig, request: InstallTemplateRequest): Promise<InstallTemplateResponse> {
@@ -3170,11 +3689,35 @@ async function installMarketplaceTemplate(config: SkillSpaceConfig, request: Ins
     }
     await copyTemplatePackageToSkill(packageRoot, destination, effectiveVariables);
     await ensureSkillSpaceManifest(destination);
+    await writeInstalledTemplateConfig(destination, template, effectiveVariables);
+    const dependencyResult = await installBundledDependencies(config, destination, effectiveVariables);
     const skill = await scanSkillFolder(destination);
+    const dependencyMessage = [
+      dependencyResult.installed.length ? `Bundled dependencies installed: ${dependencyResult.installed.map((item) => item.name).join(", ")}.` : "",
+      ...dependencyResult.warnings
+    ].filter(Boolean).join(" ");
     return {
       installed: Boolean(skill),
       skill: skill ?? undefined,
-      message: skill ? `Installed ${skill.name}.` : "Template installed, but Skill-Space could not read it."
+      message: skill ? `Installed ${skill.name}.${dependencyMessage ? ` ${dependencyMessage}` : ""}` : "Template installed, but Skill-Space could not read it."
+    };
+  }
+
+  const packageFiles = await fetchTemplatePackageFiles(template);
+  if (packageFiles?.length) {
+    await writeTemplatePackageFiles(destination, packageFiles, effectiveVariables);
+    await ensureSkillSpaceManifest(destination);
+    await writeInstalledTemplateConfig(destination, template, effectiveVariables);
+    const dependencyResult = await installBundledDependencies(config, destination, effectiveVariables);
+    const skill = await scanSkillFolder(destination);
+    const dependencyMessage = [
+      dependencyResult.installed.length ? `Bundled dependencies installed: ${dependencyResult.installed.map((item) => item.name).join(", ")}.` : "",
+      ...dependencyResult.warnings
+    ].filter(Boolean).join(" ");
+    return {
+      installed: Boolean(skill),
+      skill: skill ?? undefined,
+      message: skill ? `Installed ${skill.name}.${dependencyMessage ? ` ${dependencyMessage}` : ""}` : "Template installed, but Skill-Space could not read it."
     };
   }
 
@@ -3235,6 +3778,7 @@ async function installMarketplaceTemplate(config: SkillSpaceConfig, request: Ins
     network: { enabled: true, domains: ["*"] },
     secrets: { allowReferences: true, storePlaintext: false }
   });
+  await writeInstalledTemplateConfig(destination, template, effectiveVariables);
 
   const skill = await scanSkillFolder(destination);
   return {
@@ -3486,6 +4030,15 @@ function isUserDecisionRequest(message: string): boolean {
   ].some((pattern) => pattern.test(message) || pattern.test(text));
 }
 
+function isCompletionMessage(message: string): boolean {
+  const text = powershellSingleLine(message).toLowerCase();
+  return [
+    /(?:已完成|完成|运行完成|任务完成|执行完成|成功|已生成|已保存|已上传|已同步|已发布|全部完成|无需回复|不需要回复)/i,
+    /(?:completed|finished|done|success|succeeded|all checks passed|final report|execution report|no reply needed)/i,
+    /(?:status|状态)\s*[:：]\s*(?:completed|done|success|已完成|完成)/i
+  ].some((pattern) => pattern.test(message) || pattern.test(text));
+}
+
 function claudeArgsFromConfig(agent: AgentConfig, sessionId?: string): string[] {
   const args = (agent.args ?? fallbackConfig.agents.claude.args ?? []).filter((arg) => arg !== "{{prompt}}");
   if (sessionId) {
@@ -3665,11 +4218,14 @@ function shouldSummarizeDescription(description: string): boolean {
 async function updateSkillManifestDescription(skillRoot: string, summary: string): Promise<void> {
   const manifestPath = join(skillRoot, ".skillspace", "manifest.json");
   const manifest = (await readJsonFile<Record<string, unknown>>(manifestPath)) ?? {};
+  const now = new Date().toISOString();
   await writeJsonFile(manifestPath, {
     ...manifest,
+    version: bumpPatchVersion(manifest.version),
+    updatedAt: now,
     description: summary,
     llmSummary: {
-      generatedAt: new Date().toISOString(),
+      generatedAt: now,
       provider: "claude",
       text: summary
     }
@@ -3679,11 +4235,14 @@ async function updateSkillManifestDescription(skillRoot: string, summary: string
 async function updateSkillManifestTag(skillRoot: string, tag: string): Promise<void> {
   const manifestPath = join(skillRoot, ".skillspace", "manifest.json");
   const manifest = (await readJsonFile<Record<string, unknown>>(manifestPath)) ?? {};
+  const now = new Date().toISOString();
   await writeJsonFile(manifestPath, {
     ...manifest,
+    version: bumpPatchVersion(manifest.version),
+    updatedAt: now,
     tags: [tag],
     llmTag: {
-      generatedAt: new Date().toISOString(),
+      generatedAt: now,
       provider: "claude",
       text: tag
     }
@@ -3815,6 +4374,7 @@ async function editSkillWithLlm(config: SkillSpaceConfig, request: EditSkillWith
   const summary = extractTaggedSection(result, "summary") ?? "已根据你的要求修改 SKILL.md。";
   await writeFile(skillPath, `${nextMarkdown.trim()}\n`, "utf8");
   await ensureSkillSpaceManifest(skill.root);
+  await bumpSkillManifestVersion(skill.root, "llm-edit");
   await scanSkills(config);
   return {
     skill: await getSkillDetail(config, request.skillId),
@@ -4302,7 +4862,10 @@ async function executeRun(
     }
     if (parsed.lastMessage) {
       lastMessage = parsed.lastMessage;
-      if (isUserDecisionRequest(parsed.lastMessage)) {
+      if (isCompletionMessage(parsed.lastMessage)) {
+        waitingSignalSeen = false;
+        waitingSignalMessage = "";
+      } else if (isUserDecisionRequest(parsed.lastMessage)) {
         waitingSignalSeen = true;
         waitingSignalMessage = parsed.lastMessage;
       }
@@ -4362,8 +4925,9 @@ async function executeRun(
     const endedAt = new Date().toISOString();
     const canComplete = (code === 0 || codexTurnCompleted) && !outputSuggestsEmptyPrompt;
     const lastMessageIsWaiting = lastMessage ? isUserDecisionRequest(lastMessage) : false;
-    const waiting = canComplete && (lastMessageIsWaiting || waitingSignalSeen);
-    const waitingMessage = lastMessageIsWaiting ? lastMessage : waitingSignalMessage;
+    const lastMessageCompleted = lastMessage ? isCompletionMessage(lastMessage) : false;
+    const waiting = canComplete && !lastMessageCompleted && (lastMessageIsWaiting || (!lastMessage && waitingSignalSeen));
+    const waitingMessage = lastMessageIsWaiting ? lastMessage : !lastMessage ? waitingSignalMessage : "";
     const status =
       canComplete
         ? waiting
@@ -4983,6 +5547,9 @@ app.whenReady().then(() => {
   );
   ipcMain.handle("skillspace:marketplace-delete", async (_, templateId: string) =>
     deleteMarketplaceTemplate(await ensureConfig(), templateId)
+  );
+  ipcMain.handle("skillspace:marketplace-delete-uploaded", async (_, templateId: string) =>
+    deleteUploadedMarketplaceTemplate(await ensureConfig(), templateId)
   );
   ipcMain.handle("skillspace:marketplace-share", async (_, templateId: string) =>
     shareMarketplaceTemplate(await ensureConfig(), templateId)

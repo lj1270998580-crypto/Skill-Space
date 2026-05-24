@@ -77,6 +77,8 @@ const api: SkillSpaceApi = {
     ipcRenderer.invoke("skillspace:publish-skill-template", skillId) as Promise<PublishTemplateResponse>,
   deleteMarketplaceTemplate: (templateId: string) =>
     ipcRenderer.invoke("skillspace:marketplace-delete", templateId) as Promise<DeleteTemplateResponse>,
+  deleteUploadedMarketplaceTemplate: (templateId: string) =>
+    ipcRenderer.invoke("skillspace:marketplace-delete-uploaded", templateId) as Promise<DeleteTemplateResponse>,
   shareMarketplaceTemplate: (templateId: string) =>
     ipcRenderer.invoke("skillspace:marketplace-share", templateId) as Promise<ShareTemplateResponse>,
   listMarketplaceTemplates: () =>

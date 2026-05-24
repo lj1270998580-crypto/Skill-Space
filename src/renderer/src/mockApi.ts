@@ -299,8 +299,17 @@ export function installMockApiWhenMissing(): void {
         message: mockMarketplaceTemplates.length < before ? "Mock template deleted." : "Mock template was not local."
       };
     },
+    deleteUploadedMarketplaceTemplate: async (templateId: string) => {
+      const before = mockMarketplaceTemplates.length;
+      mockMarketplaceTemplates = mockMarketplaceTemplates.filter((template) => template.id !== templateId);
+      return {
+        deleted: mockMarketplaceTemplates.length < before,
+        message: mockMarketplaceTemplates.length < before ? "Mock remote template deleted." : "Mock remote template not found."
+      };
+    },
     shareMarketplaceTemplate: async (templateId: string) => ({
       shared: true,
+      uploaded: true,
       packageRoot: `D:\\Skill-Space\\marketplace\\share\\${templateId}`,
       catalogPath: `D:\\Skill-Space\\marketplace\\share\\${templateId}\\catalog.json`,
       message: `Mock share package generated for ${templateId}.`

@@ -76,6 +76,7 @@ import { createTranslator } from "./i18n";
 
 type ViewId = "dashboard" | "skills" | "marketplace" | "runs" | "automations" | "agents" | "feishu" | "settings";
 type ThemeMode = "light" | "dark";
+type MarketplaceScope = "installed" | "cloud" | "uploaded";
 type StewardChatMessage = {
   role: "user" | "assistant";
   content: string;
@@ -123,6 +124,23 @@ const statusIcon = {
   disabled: CircleOff,
   checking: Loader2
 };
+
+function isUploadedTemplate(template: SkillTemplateListing): boolean {
+  return Boolean(template.uploaded) || template.source === "local";
+}
+
+function getMarketplaceScope(template: SkillTemplateListing): MarketplaceScope {
+  if (template.source === "remote") {
+    return "cloud";
+  }
+  if (isUploadedTemplate(template)) {
+    return "uploaded";
+  }
+  if (template.installed) {
+    return "installed";
+  }
+  return "cloud";
+}
 
 const fallbackAgentPresets: AgentPreset[] = [
   {
@@ -181,6 +199,16 @@ function formatDate(value: string, locale: Locale): string {
     hour: "2-digit",
     minute: "2-digit"
   }).format(new Date(value));
+}
+
+function formatBytes(value?: number): string {
+  if (!value || value <= 0) {
+    return "0 KB";
+  }
+  if (value < 1024 * 1024) {
+    return `${Math.ceil(value / 1024)} KB`;
+  }
+  return `${(value / 1024 / 1024).toFixed(1)} MB`;
 }
 
 export function App(): ReactElement {
@@ -251,11 +279,13 @@ export function App(): ReactElement {
   const [skillEditFeedback, setSkillEditFeedback] = useState("");
   const [marketplaceTemplates, setMarketplaceTemplates] = useState<SkillTemplateListing[]>([]);
   const [marketplaceQuery, setMarketplaceQuery] = useState("");
+  const [marketplaceScope, setMarketplaceScope] = useState<MarketplaceScope>("cloud");
   const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(null);
   const [templateVariables, setTemplateVariables] = useState<Record<string, string>>({});
   const [isInstallingTemplate, setIsInstallingTemplate] = useState(false);
   const [isRefreshingMarketplace, setIsRefreshingMarketplace] = useState(false);
   const [isDeletingTemplate, setIsDeletingTemplate] = useState(false);
+  const [isDeletingUploadedTemplate, setIsDeletingUploadedTemplate] = useState(false);
   const [isSharingTemplate, setIsSharingTemplate] = useState(false);
   const [marketplaceMessage, setMarketplaceMessage] = useState("");
   const [isRefreshing, setIsRefreshing] = useState(true);
@@ -317,6 +347,9 @@ export function App(): ReactElement {
   const filteredMarketplaceTemplates = useMemo(() => {
     const query = marketplaceQuery.trim().toLowerCase();
     return marketplaceTemplates.filter((template) => {
+      if (getMarketplaceScope(template) !== marketplaceScope) {
+        return false;
+      }
       if (!query) {
         return true;
       }
@@ -332,15 +365,35 @@ export function App(): ReactElement {
         .toLowerCase()
         .includes(query);
     });
-  }, [marketplaceTemplates, marketplaceQuery]);
+  }, [marketplaceTemplates, marketplaceQuery, marketplaceScope]);
+
+  const marketplaceScopeCounts = useMemo(() => {
+    return marketplaceTemplates.reduce<Record<MarketplaceScope, number>>(
+      (counts, template) => {
+        counts[getMarketplaceScope(template)] += 1;
+        return counts;
+      },
+      { installed: 0, cloud: 0, uploaded: 0 }
+    );
+  }, [marketplaceTemplates]);
 
   const selectedTemplate = useMemo(() => {
-    if (marketplaceTemplates.length === 0) {
+    if (filteredMarketplaceTemplates.length === 0) {
       return null;
     }
 
-    return marketplaceTemplates.find((template) => template.id === selectedTemplateId) ?? marketplaceTemplates[0];
-  }, [marketplaceTemplates, selectedTemplateId]);
+    return filteredMarketplaceTemplates.find((template) => template.id === selectedTemplateId) ?? filteredMarketplaceTemplates[0];
+  }, [filteredMarketplaceTemplates, selectedTemplateId]);
+
+  useEffect(() => {
+    if (filteredMarketplaceTemplates.length === 0) {
+      setSelectedTemplateId(null);
+      return;
+    }
+    if (!filteredMarketplaceTemplates.some((template) => template.id === selectedTemplateId)) {
+      setSelectedTemplateId(filteredMarketplaceTemplates[0].id);
+    }
+  }, [filteredMarketplaceTemplates, selectedTemplateId]);
 
   async function load(): Promise<void> {
     setIsRefreshing(true);
@@ -365,7 +418,11 @@ export function App(): ReactElement {
     setLlmStatus(nextLlmStatus);
     setUpdateStatus(nextUpdateStatus);
     setMarketplaceTemplates(templates);
-    setSelectedTemplateId((current) => current ?? templates[0]?.id ?? null);
+    setSelectedTemplateId((current) =>
+      current && templates.some((template) => template.id === current)
+        ? current
+        : templates.find((template) => getMarketplaceScope(template) === marketplaceScope)?.id ?? templates[0]?.id ?? null
+    );
     setSelectedRunId((current) => current ?? next.runs[0]?.runId ?? null);
     setLocale(
       storedLocale && next.config.locale.supported.includes(storedLocale)
@@ -409,7 +466,11 @@ export function App(): ReactElement {
     setLlmStatus(nextLlmStatus);
     setUpdateStatus(nextUpdateStatus);
     setMarketplaceTemplates(templates);
-    setSelectedTemplateId((current) => current ?? templates[0]?.id ?? null);
+    setSelectedTemplateId((current) =>
+      current && templates.some((template) => template.id === current)
+        ? current
+        : templates.find((template) => getMarketplaceScope(template) === marketplaceScope)?.id ?? templates[0]?.id ?? null
+    );
     setSelectedRunId((current) => current ?? runs[0]?.runId ?? null);
     setSelectedSkillId((current) => current ?? skills[0]?.id ?? null);
     if (selectedSkillId) {
@@ -504,7 +565,11 @@ export function App(): ReactElement {
       ]);
       setMarketplaceTemplates(templates);
       setPayload((current) => (current ? { ...current, skills } : current));
-      setSelectedTemplateId((current) => current ?? templates[0]?.id ?? null);
+      setSelectedTemplateId((current) =>
+        current && templates.some((template) => template.id === current && getMarketplaceScope(template) === marketplaceScope)
+          ? current
+          : templates.find((template) => getMarketplaceScope(template) === marketplaceScope)?.id ?? templates[0]?.id ?? null
+      );
       const remoteCount = templates.filter((template) => template.source === "remote").length;
       setMarketplaceMessage(`${t("marketplace.refreshDone")}: ${templates.length} / ${t("marketplace.remote")}: ${remoteCount}`);
     } catch (error) {
@@ -536,6 +601,28 @@ export function App(): ReactElement {
     }
   }
 
+  async function deleteUploadedSelectedTemplate(): Promise<void> {
+    if (!selectedTemplate) {
+      return;
+    }
+
+    setIsDeletingUploadedTemplate(true);
+    setMarketplaceMessage("");
+    try {
+      const response = await window.skillSpace.deleteUploadedMarketplaceTemplate(selectedTemplate.id);
+      const templates = await window.skillSpace.refreshMarketplaceTemplates();
+      setMarketplaceTemplates(templates);
+      setSelectedTemplateId((current) =>
+        current === selectedTemplate.id ? templates.find((template) => getMarketplaceScope(template) === marketplaceScope)?.id ?? null : current
+      );
+      setMarketplaceMessage(response.message);
+    } catch (error) {
+      setMarketplaceMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsDeletingUploadedTemplate(false);
+    }
+  }
+
   async function shareSelectedTemplate(): Promise<void> {
     if (!selectedTemplate) {
       return;
@@ -545,6 +632,14 @@ export function App(): ReactElement {
     setMarketplaceMessage("");
     try {
       const response = await window.skillSpace.shareMarketplaceTemplate(selectedTemplate.id);
+      const templates = await window.skillSpace.refreshMarketplaceTemplates();
+      setMarketplaceTemplates(templates);
+      setMarketplaceScope(response.uploaded ? "cloud" : "uploaded");
+      setSelectedTemplateId(
+        templates.find((template) => template.id === selectedTemplate.id)?.id ??
+          templates.find((template) => getMarketplaceScope(template) === (response.uploaded ? "cloud" : "uploaded"))?.id ??
+          null
+      );
       setMarketplaceMessage(response.message);
     } catch (error) {
       setMarketplaceMessage(error instanceof Error ? error.message : String(error));
@@ -677,8 +772,18 @@ export function App(): ReactElement {
     setPublishFeedback("");
     try {
       const response = await window.skillSpace.prepareSkillPackage(selectedSkill.id);
+      const services = Array.isArray(response.requirements?.externalServices)
+        ? response.requirements.externalServices.map(String).join(", ")
+        : "";
+      const tools = Array.isArray(response.requirements?.cliTools)
+        ? response.requirements.cliTools.map(String).join(", ")
+        : "";
       setPublishFeedback(
-        `${t("publish.ready")}: ${response.packageRoot}\n${t("publish.files")}: ${response.filesCopied} / ${t("publish.variables")}: ${response.variables.length} / ${t("publish.warnings")}: ${response.warnings.length}`
+        [
+          `${t("publish.ready")}: ${response.packageRoot}`,
+          `${t("publish.files")}: ${response.filesCopied} / ${t("publish.variables")}: ${response.variables.length} / ${t("publish.warnings")}: ${response.warnings.length}`,
+          `上传前审查: 已隐藏本地路径；内置依赖 ${response.dependencies?.length ?? 0} 个；服务 ${services || "无"}；工具 ${tools || "无"}。`
+        ].join("\n")
       );
     } catch (error) {
       setPublishFeedback(error instanceof Error ? error.message : String(error));
@@ -698,9 +803,10 @@ export function App(): ReactElement {
       const response = await window.skillSpace.publishSkillTemplate(selectedSkill.id);
       const templates = await window.skillSpace.listMarketplaceTemplates();
       setMarketplaceTemplates(templates);
+      setMarketplaceScope("uploaded");
       setSelectedTemplateId(response.template?.id ?? templates[0]?.id ?? null);
       setPublishFeedback(
-        `${response.message}\n${t("publish.files")}: ${response.packageRoot ?? ""} / ${t("publish.warnings")}: ${response.warnings.length}`
+        `${response.message}\n${t("publish.files")}: ${response.packageRoot ?? ""} / ${t("publish.warnings")}: ${response.warnings.length}\n\u5df2\u751f\u6210\u53ef\u590d\u7528\u6a21\u677f\u5305\uff0c\u672c\u5730\u8def\u5f84\u548c\u654f\u611f\u914d\u7f6e\u4f1a\u88ab\u66ff\u6362\u6210\u5b89\u88c5\u53d8\u91cf\u3002`
       );
       setActiveView("marketplace");
     } catch (error) {
@@ -1349,6 +1455,8 @@ export function App(): ReactElement {
             {activeView === "marketplace" && (
               <MarketplacePanel
                 templates={filteredMarketplaceTemplates}
+                scope={marketplaceScope}
+                scopeCounts={marketplaceScopeCounts}
                 selectedTemplate={selectedTemplate}
                 query={marketplaceQuery}
                 variables={templateVariables}
@@ -1356,9 +1464,11 @@ export function App(): ReactElement {
                 isInstalling={isInstallingTemplate}
                 isRefreshing={isRefreshingMarketplace}
                 isDeleting={isDeletingTemplate}
+                isDeletingUploaded={isDeletingUploadedTemplate}
                 isSharing={isSharingTemplate}
                 locale={locale}
                 onQueryChange={setMarketplaceQuery}
+                onScopeChange={setMarketplaceScope}
                 onSelect={(template) => {
                   setSelectedTemplateId(template.id);
                   setMarketplaceMessage("");
@@ -1372,6 +1482,7 @@ export function App(): ReactElement {
                 onInstall={() => void installSelectedTemplate()}
                 onRefresh={() => void refreshMarketplace()}
                 onDelete={() => void deleteSelectedTemplate()}
+                onDeleteUploaded={() => void deleteUploadedSelectedTemplate()}
                 onShare={() => void shareSelectedTemplate()}
                 t={t}
               />
@@ -1499,7 +1610,6 @@ export function App(): ReactElement {
                 onRunInputChange={setRunInput}
                 onRun={() => void runSelectedSkill()}
                 onSummarize={() => void summarizeSelectedSkill()}
-                onPreparePublish={() => void prepareSelectedSkillPackage()}
                 onPublishTemplate={() => void publishSelectedSkillTemplate()}
                 skillEditPrompt={skillEditPrompt}
                 skillEditFeedback={skillEditFeedback}
@@ -1509,7 +1619,6 @@ export function App(): ReactElement {
                 onEditSkill={() => void editSelectedSkillWithLlm()}
                 isRunning={isRunning}
                 isSummarizing={isSummarizing}
-                isPreparingPublish={isPreparingPublish}
                 isPublishingTemplate={isPublishingTemplate}
                 useParameterForm={useParameterForm}
                 skillChanges={skillChanges.filter((change) => change.skillId === selectedSkill?.id).slice(0, 3)}
@@ -1864,6 +1973,8 @@ function SkillLibrary({
 
 function MarketplacePanel({
   templates,
+  scope,
+  scopeCounts,
   selectedTemplate,
   query,
   variables,
@@ -1871,18 +1982,23 @@ function MarketplacePanel({
   isInstalling,
   isRefreshing,
   isDeleting,
+  isDeletingUploaded,
   isSharing,
   locale,
   onQueryChange,
+  onScopeChange,
   onSelect,
   onVariableChange,
   onInstall,
   onRefresh,
   onDelete,
+  onDeleteUploaded,
   onShare,
   t
 }: {
   templates: SkillTemplateListing[];
+  scope: MarketplaceScope;
+  scopeCounts: Record<MarketplaceScope, number>;
   selectedTemplate: SkillTemplateListing | null;
   query: string;
   variables: Record<string, string>;
@@ -1890,21 +2006,29 @@ function MarketplacePanel({
   isInstalling: boolean;
   isRefreshing: boolean;
   isDeleting: boolean;
+  isDeletingUploaded: boolean;
   isSharing: boolean;
   locale: Locale;
   onQueryChange: (value: string) => void;
+  onScopeChange: (scope: MarketplaceScope) => void;
   onSelect: (template: SkillTemplateListing) => void;
   onVariableChange: (key: string, value: string) => void;
   onInstall: () => void;
   onRefresh: () => void;
   onDelete: () => void;
+  onDeleteUploaded: () => void;
   onShare: () => void;
   t: (key: string) => string;
 }): ReactElement {
   const configurableVariables = selectedTemplate?.requiredVariables.filter((variable) => variable.kind !== "path") ?? [];
-  const missingRequired = configurableVariables.some(
-    (variable) => !variables[variable.key]?.trim()
-  );
+  const missingRequired = false;
+  const requirementServices = Array.isArray(selectedTemplate?.requirements?.externalServices)
+    ? selectedTemplate.requirements.externalServices.map(String)
+    : [];
+  const requirementTools = Array.isArray(selectedTemplate?.requirements?.cliTools)
+    ? selectedTemplate.requirements.cliTools.map(String)
+    : [];
+  const dependencyCount = selectedTemplate?.dependencies?.length ?? 0;
 
   return (
     <section className="marketplace-shell">
@@ -1932,6 +2056,19 @@ function MarketplacePanel({
             <Search size={16} />
             <input value={query} onChange={(event) => onQueryChange(event.target.value)} placeholder={t("marketplace.search")} />
           </label>
+          <div className="marketplace-tabs" role="tablist" aria-label={t("marketplace.title")}>
+            {(["installed", "cloud", "uploaded"] as MarketplaceScope[]).map((item) => (
+              <button
+                className={`marketplace-tab ${scope === item ? "active" : ""}`}
+                key={item}
+                onClick={() => onScopeChange(item)}
+                type="button"
+              >
+                <span>{t(`marketplace.scope.${item}`)}</span>
+                <strong>{scopeCounts[item]}</strong>
+              </button>
+            ))}
+          </div>
 
           <div className="template-grid">
             {templates.length === 0 ? (
@@ -1956,10 +2093,10 @@ function MarketplacePanel({
                   </div>
                   <p>{template.description}</p>
                   <div className="template-meta">
-                    <span>{t(`marketplace.${template.source ?? "official"}`)}</span>
+                    <span>{template.uploaded ? t("marketplace.uploaded") : t(`marketplace.${template.source ?? "official"}`)}</span>
                     <span>{template.installed ? t("marketplace.installed") : t("marketplace.notInstalled")}</span>
-                    <span>{t("marketplace.downloads")} {template.downloads}</span>
-                    <span>{t("marketplace.rating")} {template.rating.toFixed(1)}</span>
+                    {template.downloads > 0 && <span>{t("marketplace.downloads")} {template.downloads}</span>}
+                    {template.rating > 0 && <span>{t("marketplace.rating")} {template.rating.toFixed(1)}</span>}
                     <span>{formatDate(template.updatedAt, locale)}</span>
                   </div>
                 </button>
@@ -1982,16 +2119,40 @@ function MarketplacePanel({
               </div>
               <p>{selectedTemplate.description}</p>
               <div className="template-stats">
-                <span>{t(`marketplace.${selectedTemplate.source ?? "official"}`)}</span>
+                <span>{selectedTemplate.uploaded ? t("marketplace.uploaded") : t(`marketplace.${selectedTemplate.source ?? "official"}`)}</span>
                 <span>{selectedTemplate.installed ? t("marketplace.installed") : t("marketplace.notInstalled")}</span>
                 <span>{t("view.version")} {selectedTemplate.version}</span>
-                <span>{t("marketplace.downloads")} {selectedTemplate.downloads}</span>
-                <span>{t("marketplace.rating")} {selectedTemplate.rating.toFixed(1)}</span>
+                {selectedTemplate.downloads > 0 && <span>{t("marketplace.downloads")} {selectedTemplate.downloads}</span>}
+                {selectedTemplate.rating > 0 && <span>{t("marketplace.rating")} {selectedTemplate.rating.toFixed(1)}</span>}
               </div>
               <div className="chip-row">
                 {selectedTemplate.runtimes.map((runtime) => (
                   <span className="chip" key={runtime}>{runtime}</span>
                 ))}
+              </div>
+              {(dependencyCount > 0 || requirementServices.length > 0 || requirementTools.length > 0) && (
+                <div className="template-requirements">
+                  {dependencyCount > 0 && (
+                    <span>{t("marketplace.dependencies")} {dependencyCount}</span>
+                  )}
+                  {requirementServices.slice(0, 4).map((service) => (
+                    <span key={service}>{service}</span>
+                  ))}
+                  {requirementTools.slice(0, 5).map((tool) => (
+                    <span key={tool}>{tool}</span>
+                  ))}
+                </div>
+              )}
+
+              <div className="template-security-summary">
+                <strong>{locale === "zh-CN" ? "\u5b89\u88c5\u524d\u5ba1\u67e5" : "Pre-install Review"}</strong>
+                <span>{locale === "zh-CN" ? "\u5305\u4f53" : "Package"} {selectedTemplate.hasPackage || selectedTemplate.packageUrl ? formatBytes(selectedTemplate.packageSize) : selectedTemplate.packageRoot ? "Local" : "SKILL.md"}</span>
+                <span>{locale === "zh-CN" ? "\u4f9d\u8d56" : "Dependencies"} {dependencyCount}</span>
+                <span>{locale === "zh-CN" ? "\u670d\u52a1" : "Services"} {requirementServices.length ? requirementServices.join(", ") : (locale === "zh-CN" ? "\u65e0" : "None")}</span>
+                <span>{locale === "zh-CN" ? "\u5de5\u5177" : "Tools"} {requirementTools.length ? requirementTools.join(", ") : (locale === "zh-CN" ? "\u65e0" : "None")}</span>
+                {selectedTemplate.source === "remote" && (
+                  <span>{locale === "zh-CN" ? "\u8fdc\u7aef\u6a21\u677f\u5b89\u88c5\u65f6\u4f1a\u6821\u9a8c\u5305\u54c8\u5e0c\uff0c\u5e76\u53ea\u5199\u5165\u672c\u5730\u6280\u80fd\u76ee\u5f55\u3002\u5fc5\u586b\u914d\u7f6e\u53ef\u5728\u5b89\u88c5\u540e\u8865\u9f50\u3002" : "Remote package hash is verified before writing into the local skill directory. Required configuration can be completed after install."}</span>
+                )}
               </div>
 
               <div className="template-config">
@@ -2026,6 +2187,12 @@ function MarketplacePanel({
                   {isSharing ? <Loader2 size={16} className="spin" /> : <UploadCloud size={16} />}
                   <span>{t("marketplace.share")}</span>
                 </button>
+                {selectedTemplate.deleteTokenStored && (
+                  <button className="secondary-button danger" onClick={onDeleteUploaded} type="button" disabled={isDeletingUploaded}>
+                    {isDeletingUploaded ? <Loader2 size={16} className="spin" /> : <Trash2 size={16} />}
+                    <span>{t("marketplace.deleteUploaded")}</span>
+                  </button>
+                )}
                 {selectedTemplate.source === "local" && (
                   <button className="icon-button danger" onClick={onDelete} type="button" disabled={isDeleting} title={t("marketplace.delete")}>
                     {isDeleting ? <Loader2 size={16} className="spin" /> : <Trash2 size={16} />}
@@ -2239,6 +2406,7 @@ function AgentPanel({
   const [selectedPresetId, setSelectedPresetId] = useState(fallbackAgentPresets[0]?.id ?? "custom-agent");
   const [candidates, setCandidates] = useState<AgentCandidate[]>([]);
   const [isDetecting, setIsDetecting] = useState(false);
+  const [isCandidateDialogOpen, setIsCandidateDialogOpen] = useState(false);
   const agentOptions = candidates.length > 0
     ? [...candidates, ...fallbackAgentPresets.filter((preset) => !candidates.some((candidate) => candidate.id === preset.id))]
     : fallbackAgentPresets;
@@ -2246,10 +2414,6 @@ function AgentPanel({
   useEffect(() => {
     setDrafts(configs);
   }, [configs]);
-
-  useEffect(() => {
-    void detectCandidates();
-  }, []);
 
   function updateDraft(agentId: AgentId, patch: Partial<AgentConfig>): void {
     setDrafts((current) => ({
@@ -2298,21 +2462,18 @@ function AgentPanel({
       if (firstAvailable) {
         setSelectedPresetId(firstAvailable.id);
       }
+      setIsCandidateDialogOpen(true);
     } finally {
       setIsDetecting(false);
     }
   }
 
-  async function addPresetAgent(): Promise<void> {
-    const preset =
-      candidates.find((item) => item.id === selectedPresetId) ??
-      fallbackAgentPresets.find((item) => item.id === selectedPresetId) ??
-      fallbackAgentPresets[0];
+  async function addAgentFromPreset(preset: AgentPreset | AgentCandidate): Promise<void> {
     if (!preset) {
       return;
     }
 
-    const agentId = isAgentCandidate(preset) && preset.alreadyConfigured ? preset.id : uniqueAgentId(preset.id, configs);
+    const agentId = isAgentCandidate(preset) && !preset.alreadyConfigured ? preset.id : uniqueAgentId(preset.id, configs);
     const config: AgentConfig = {
       enabled: true,
       label: preset.label,
@@ -2328,6 +2489,16 @@ function AgentPanel({
     }
   }
 
+  async function addPresetAgent(): Promise<void> {
+    const preset =
+      candidates.find((item) => item.id === selectedPresetId) ??
+      fallbackAgentPresets.find((item) => item.id === selectedPresetId) ??
+      fallbackAgentPresets[0];
+    if (preset) {
+      await addAgentFromPreset(preset);
+    }
+  }
+
   return (
     <section className="agent-list">
       <div className="agent-add-panel glass-panel">
@@ -2339,7 +2510,7 @@ function AgentPanel({
           {agentOptions.map((preset) => (
             <option key={preset.id} value={preset.id}>
               {isAgentCandidate(preset)
-                ? `${preset.installed ? "已安装" : "未检测"} · ${preset.label}${preset.alreadyConfigured ? " · 已配置" : ""}`
+                ? `${preset.installed ? "\u5df2\u5b89\u88c5" : "\u672a\u68c0\u6d4b"} \u00b7 ${preset.label}${preset.alreadyConfigured ? " \u00b7 \u5df2\u914d\u7f6e" : ""}`
                 : preset.label}
             </option>
           ))}
@@ -2353,6 +2524,48 @@ function AgentPanel({
           <span>{t("agent.add")}</span>
         </button>
       </div>
+      {isCandidateDialogOpen && (
+        <div className="modal-backdrop" role="presentation">
+          <section className="discovery-modal glass-panel agent-scan-dialog" role="dialog" aria-modal="true">
+            <div className="modal-title">
+              <div>
+                <Bot size={18} />
+                <strong>{t("agent.detect")}</strong>
+              </div>
+              <button className="icon-button" type="button" onClick={() => setIsCandidateDialogOpen(false)}>
+                <X size={16} />
+              </button>
+            </div>
+            <div className="agent-candidate-list">
+              {candidates.length === 0 ? (
+                <span className="muted">{t("view.none")}</span>
+              ) : (
+                candidates.map((candidate) => (
+                  <article className="agent-candidate-row" key={candidate.id}>
+                    <div className={`agent-status ${candidate.installed ? "online" : "offline"}`}>
+                      {candidate.installed ? <CheckCircle2 size={16} /> : <XCircle size={16} />}
+                    </div>
+                    <div>
+                      <strong>{candidate.label}</strong>
+                      <span>{candidate.command}</span>
+                      <small>{candidate.detail}</small>
+                    </div>
+                    <button
+                      className="secondary-button"
+                      type="button"
+                      disabled={!candidate.installed}
+                      onClick={() => void addAgentFromPreset(candidate)}
+                    >
+                      <Plus size={15} />
+                      <span>{candidate.alreadyConfigured ? "\u518d\u6dfb\u52a0" : t("agent.add")}</span>
+                    </button>
+                  </article>
+                ))
+              )}
+            </div>
+          </section>
+        </div>
+      )}
       <div className="agent-card-grid">
       {agents.map((agent) => {
         const Icon = statusIcon[agent.status];
@@ -3421,7 +3634,6 @@ function SkillInspector({
   onRunInputChange,
   onRun,
   onSummarize,
-  onPreparePublish,
   onPublishTemplate,
   skillEditPrompt,
   skillEditFeedback,
@@ -3431,7 +3643,6 @@ function SkillInspector({
   onEditSkill,
   isRunning,
   isSummarizing,
-  isPreparingPublish,
   isPublishingTemplate,
   useParameterForm,
   skillChanges,
@@ -3450,7 +3661,6 @@ function SkillInspector({
   onRunInputChange: (input: string) => void;
   onRun: () => void;
   onSummarize: () => void;
-  onPreparePublish: () => void;
   onPublishTemplate: () => void;
   skillEditPrompt: string;
   skillEditFeedback: string;
@@ -3460,7 +3670,6 @@ function SkillInspector({
   onEditSkill: () => void;
   isRunning: boolean;
   isSummarizing: boolean;
-  isPreparingPublish: boolean;
   isPublishingTemplate: boolean;
   useParameterForm: boolean;
   skillChanges: SkillChange[];
@@ -3483,6 +3692,13 @@ function SkillInspector({
   const permissionsText = compactJson(detail?.permissions);
   const adaptersText = compactJson(detail?.adapters);
   const files = detail?.files.slice(0, 12) ?? [];
+  const installConfig =
+    detail?.installConfig && typeof detail.installConfig === "object"
+      ? (detail.installConfig as { configured?: boolean; requiredVariables?: Array<{ key?: string; label?: string }> })
+      : null;
+  const pendingConfig = installConfig && installConfig.configured === false
+    ? (installConfig.requiredVariables ?? []).map((item) => item.label || item.key).filter(Boolean).join(", ")
+    : "";
 
   return (
     <div className="inspector-content">
@@ -3504,16 +3720,19 @@ function SkillInspector({
           {isSummarizing ? <Loader2 size={15} className="spin" /> : <Wand2 size={15} />}
           <span>{t("action.summarize")}</span>
         </button>
-        <button className="secondary-button compact" onClick={onPreparePublish} type="button" disabled={!detail || isPreparingPublish}>
-          {isPreparingPublish ? <Loader2 size={15} className="spin" /> : <FolderInput size={15} />}
-          <span>{t("publish.prepare")}</span>
-        </button>
         <button className="secondary-button compact" onClick={onPublishTemplate} type="button" disabled={!detail || isPublishingTemplate}>
           {isPublishingTemplate ? <Loader2 size={15} className="spin" /> : <Globe2 size={15} />}
-          <span>{t("publish.toLibrary")}</span>
+          <span>{t("publish.prepareAndPublish")}</span>
         </button>
         {publishFeedback && <p className="publish-feedback">{publishFeedback}</p>}
       </div>
+
+      {pendingConfig && (
+        <div className="config-warning">
+          <strong>{locale === "zh-CN" ? "\u9700\u8981\u8865\u5145\u914d\u7f6e" : "Configuration Required"}</strong>
+          <span>{pendingConfig}</span>
+        </div>
+      )}
 
       <div className="meta-list">
         <span>{t("view.version")}</span>
@@ -3544,7 +3763,9 @@ function SkillInspector({
             <div className="change-row" key={change.id}>
               <span>{formatDate(change.detectedAt, locale)}</span>
               <strong>
-                {change.before?.version ?? "?"} {"->"} {change.after.version}
+                {change.before?.version && change.before.version !== change.after.version
+                  ? `${change.before.version} -> ${change.after.version}`
+                  : locale === "zh-CN" ? "\u5185\u5bb9\u66f4\u65b0" : "Content updated"}
               </strong>
               <small>{change.after.description}</small>
             </div>

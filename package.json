@@ -1,6 +1,6 @@
 {
   "name": "skill-space",
-  "version": "0.1.17",
+  "version": "0.1.24",
   "private": true,
   "type": "module",
   "main": "out/main/index.js",
@@ -12,7 +12,8 @@
     "preview": "electron-vite preview",
     "typecheck": "tsc --noEmit",
     "pack:win": "npm run build && electron-builder --win --dir --config.electronDist=node_modules/electron/dist",
-    "dist:win": "npm run build && electron-builder --win nsis --config.electronDist=node_modules/electron/dist"
+    "dist:win": "npm run build && electron-builder --win nsis --config.electronDist=node_modules/electron/dist",
+    "test:marketplace": "node scripts/marketplace-smoke-test.cjs"
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.64.0",

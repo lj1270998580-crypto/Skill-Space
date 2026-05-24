@@ -86,6 +86,7 @@ export interface SkillDetail extends SkillSummary {
   outputSchema?: unknown;
   permissions?: unknown;
   adapters?: unknown;
+  installConfig?: unknown;
   files: SkillFileEntry[];
 }
 
@@ -223,12 +224,28 @@ export interface PublishTemplateVariable {
   example?: string;
 }
 
+export interface TemplatePackageFile {
+  path: string;
+  content: string;
+  encoding: "utf8" | "base64";
+}
+
+export interface SkillTemplateDependency {
+  id: string;
+  name: string;
+  version: string;
+  reason: string;
+  bundledPath: string;
+}
+
 export interface PrepareSkillPackageResponse {
   prepared: boolean;
   skill: SkillSummary;
   packageRoot: string;
   manifestPath: string;
   variables: PublishTemplateVariable[];
+  dependencies?: SkillTemplateDependency[];
+  requirements?: Record<string, unknown>;
   warnings: string[];
   filesProcessed: number;
   filesCopied: number;
@@ -266,8 +283,17 @@ export interface SkillTemplateListing {
   updatedAt: string;
   source?: "official" | "local" | "remote";
   packageRoot?: string;
+  packageUrl?: string;
+  packageSha256?: string;
+  packageSize?: number;
+  hasPackage?: boolean;
   templateMarkdown?: string;
+  packageFiles?: TemplatePackageFile[];
+  dependencies?: SkillTemplateDependency[];
+  requirements?: Record<string, unknown>;
   installed?: boolean;
+  uploaded?: boolean;
+  deleteTokenStored?: boolean;
 }
 
 export interface InstallTemplateRequest {
@@ -296,8 +322,10 @@ export interface DeleteTemplateResponse {
 
 export interface ShareTemplateResponse {
   shared: boolean;
+  uploaded?: boolean;
   packageRoot?: string;
   catalogPath?: string;
+  deleteTokenSaved?: boolean;
   message: string;
 }
 
@@ -469,6 +497,7 @@ export interface SkillSpaceApi {
   prepareSkillPackage(skillId: string): Promise<PrepareSkillPackageResponse>;
   publishSkillTemplate(skillId: string): Promise<PublishTemplateResponse>;
   deleteMarketplaceTemplate(templateId: string): Promise<DeleteTemplateResponse>;
+  deleteUploadedMarketplaceTemplate(templateId: string): Promise<DeleteTemplateResponse>;
   shareMarketplaceTemplate(templateId: string): Promise<ShareTemplateResponse>;
   listMarketplaceTemplates(): Promise<SkillTemplateListing[]>;
   refreshMarketplaceTemplates(): Promise<SkillTemplateListing[]>;
