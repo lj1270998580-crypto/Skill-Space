@@ -1,6 +1,6 @@
 {
   "name": "skill-space",
-  "version": "0.1.25",
+  "version": "0.1.35",
   "private": true,
   "type": "module",
   "main": "out/main/index.js",
@@ -13,7 +13,11 @@
     "typecheck": "tsc --noEmit",
     "pack:win": "npm run build && electron-builder --win --dir --config.electronDist=node_modules/electron/dist",
     "dist:win": "npm run build && electron-builder --win nsis --config.electronDist=node_modules/electron/dist",
-    "test:marketplace": "node scripts/marketplace-smoke-test.cjs"
+    "test:marketplace": "node scripts/marketplace-smoke-test.cjs",
+    "test:feishu": "node scripts/feishu-routing-smoke-test.cjs",
+    "test:safety": "node scripts/publish-safety-smoke-test.cjs",
+    "test:run-status": "node scripts/run-status-smoke-test.cjs",
+    "test:all": "npm run typecheck && npm run test:marketplace && npm run test:feishu && npm run test:safety && npm run test:run-status"
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.64.0",

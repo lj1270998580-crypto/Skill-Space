@@ -106,15 +106,49 @@ let tray: Tray | null = null;
 let closeToTrayEnabled = false;
 let isQuitting = false;
 let schedulerTimer: NodeJS.Timeout | null = null;
-let feishuChannel: { connect?: () => Promise<void>; disconnect?: () => Promise<void>; send?: (to: string, input: { text: string } | { markdown: string }) => Promise<unknown>; on?: (...args: unknown[]) => unknown } | null = null;
+type FeishuSendInput = { text: string } | { markdown: string } | { post: object };
+type FeishuSendOptions = { replyTo?: string; replyInThread?: boolean };
+type FeishuChannelLike = {
+  connect?: () => Promise<void>;
+  disconnect?: () => Promise<void>;
+  send?: (to: string, input: FeishuSendInput, options?: FeishuSendOptions) => Promise<unknown>;
+  editMessage?: (messageId: string, text: string) => Promise<void>;
+  addReaction?: (messageId: string, emojiType: string) => Promise<string>;
+  removeReaction?: (messageId: string, reactionId: string) => Promise<void>;
+  removeReactionByEmoji?: (messageId: string, emojiType: string) => Promise<boolean>;
+  botIdentity?: {
+    openId?: string;
+    name?: string;
+  };
+  rawClient?: {
+    im?: {
+      v1?: {
+        message?: {
+          update?: (args: unknown) => Promise<unknown>;
+        };
+      };
+    };
+  };
+  on?: (...args: unknown[]) => unknown;
+};
+let feishuChannel: FeishuChannelLike | null = null;
 let feishuRuntimeState: FeishuStatus["state"] = "not_configured";
 let feishuQrState: Pick<FeishuStatus, "qrDataUrl" | "qrUrl" | "qrExpiresAt"> = {};
 let feishuLastInboundAt: string | undefined;
 let feishuLastOutboundAt: string | undefined;
 let feishuDeliveryStatus: FeishuStatus["deliveryStatus"] = "idle";
 let feishuDeliveryDetail: string | undefined;
+let feishuLastInboundText: string | undefined;
+let feishuLastInboundSender: string | undefined;
+let feishuLastReplyPreview: string | undefined;
+let feishuLastReplyAt: string | undefined;
+let feishuProcessing = false;
 let feishuLastError: string | undefined;
 let feishuRegisterController: AbortController | null = null;
+const feishuHandledMessageIds = new Map<string, number>();
+const feishuMessageChunkLimit = 2_800;
+const feishuReceiptEmojiCandidates = ["THINKING", "OK", "DONE", "SMILE"];
+const isBackgroundSchedulerProcess = process.argv.includes("--background-scheduler");
 let updateStatus: UpdateStatus = {
   currentVersion: app.getVersion(),
   state: "idle",
@@ -143,10 +177,13 @@ type LlmStoredConfig = {
 };
 
 type FeishuIntent = {
-  action: "run_skill" | "list_skills" | "status" | "help" | "chat";
+  action: "run_skill" | "list_skills" | "status" | "help" | "chat" | "reply_waiting" | "clarify_waiting";
   skillId?: string;
   input?: string;
   reply?: string;
+  runId?: string;
+  runIndex?: number;
+  waitingReply?: string;
   confidence?: number;
 };
 
@@ -978,6 +1015,11 @@ function feishuStatusFromConfig(stored: FeishuStoredConfig | null): FeishuStatus
     lastOutboundAt: feishuLastOutboundAt,
     deliveryStatus: feishuDeliveryStatus,
     deliveryDetail: feishuDeliveryDetail,
+    lastInboundText: feishuLastInboundText,
+    lastInboundSender: feishuLastInboundSender,
+    lastReplyPreview: feishuLastReplyPreview,
+    lastReplyAt: feishuLastReplyAt,
+    processing: feishuProcessing,
     lastError: feishuLastError,
     canSend: Boolean(enabled && configured && stored?.receiveId)
   };
@@ -987,7 +1029,7 @@ async function getFeishuStatus(config: SkillSpaceConfig): Promise<FeishuStatus> 
   return feishuStatusFromConfig(await readFeishuConfig(config));
 }
 
-async function createFeishuChannel(stored: FeishuStoredConfig): Promise<typeof feishuChannel> {
+async function createFeishuChannel(stored: FeishuStoredConfig): Promise<FeishuChannelLike> {
   const lark = await import("@larksuiteoapi/node-sdk");
   return lark.createLarkChannel({
     appId: stored.appId,
@@ -997,7 +1039,7 @@ async function createFeishuChannel(stored: FeishuStoredConfig): Promise<typeof f
       dmMode: "open",
       requireMention: false
     }
-  }) as typeof feishuChannel;
+  }) as FeishuChannelLike;
 }
 
 async function ensureFeishuChannel(config: SkillSpaceConfig): Promise<void> {
@@ -1017,12 +1059,13 @@ async function ensureFeishuChannel(config: SkillSpaceConfig): Promise<void> {
     feishuChannel?.on?.("message", (message: unknown) => {
       feishuLastInboundAt = new Date().toISOString();
       feishuDeliveryStatus = "received";
-      feishuDeliveryDetail = "已收到飞书消息，正在处理。";
+      feishuDeliveryDetail = "已收到飞书消息，正在交给 Skill-Space 管家处理。";
       feishuLastError = undefined;
       void handleFeishuMessage(config, message).catch((error: unknown) => {
         feishuLastError = error instanceof Error ? error.message : String(error);
         feishuDeliveryStatus = "failed";
         feishuDeliveryDetail = feishuLastError;
+        feishuProcessing = false;
       });
     });
     feishuChannel?.on?.("error", (error: unknown) => {
@@ -1164,6 +1207,7 @@ async function sendFeishuText(config: SkillSpaceConfig, text: string): Promise<b
     return false;
   }
 
+  const chunks = splitFeishuText(text, feishuMessageChunkLimit);
   feishuDeliveryStatus = "sending";
   feishuDeliveryDetail = "正在发送飞书消息。";
   try {
@@ -1171,7 +1215,9 @@ async function sendFeishuText(config: SkillSpaceConfig, text: string): Promise<b
       await ensureFeishuChannel(config);
     }
     if (feishuChannel?.send && feishuRuntimeState === "connected") {
-      await feishuChannel.send(stored.receiveId, { text });
+      for (const chunk of chunks) {
+        await feishuChannel.send(stored.receiveId, { text: chunk });
+      }
       feishuLastOutboundAt = new Date().toISOString();
       feishuDeliveryStatus = "sent";
       feishuDeliveryDetail = "飞书消息已发送。";
@@ -1184,14 +1230,16 @@ async function sendFeishuText(config: SkillSpaceConfig, text: string): Promise<b
       appSecret: decryptSecret(stored.encryptedAppSecret),
       domain: lark.Domain.Feishu
     });
-    await client.im.v1.message.create({
-      params: { receive_id_type: stored.receiveIdType },
-      data: {
-        receive_id: stored.receiveId,
-        msg_type: "text",
-        content: JSON.stringify({ text })
-      }
-    });
+    for (const chunk of chunks) {
+      await client.im.v1.message.create({
+        params: { receive_id_type: stored.receiveIdType },
+        data: {
+          receive_id: stored.receiveId,
+          msg_type: "text",
+          content: JSON.stringify({ text: chunk })
+        }
+      });
+    }
     feishuLastOutboundAt = new Date().toISOString();
     feishuDeliveryStatus = "sent";
     feishuDeliveryDetail = "飞书消息已发送。";
@@ -1282,6 +1330,42 @@ function formatFeishuOutboundMarkdown(markdown: string): string {
   return output.join("\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
+function splitFeishuText(value: string, limit = feishuMessageChunkLimit): string[] {
+  const text = value.trim();
+  if (!text) {
+    return [""];
+  }
+  if (text.length <= limit) {
+    return [text];
+  }
+
+  const chunks: string[] = [];
+  let current = "";
+  const lines = text.split("\n");
+  for (const line of lines) {
+    const next = current ? `${current}\n${line}` : line;
+    if (next.length <= limit) {
+      current = next;
+      continue;
+    }
+    if (current) {
+      chunks.push(current);
+      current = "";
+    }
+    if (line.length <= limit) {
+      current = line;
+      continue;
+    }
+    for (let index = 0; index < line.length; index += limit) {
+      chunks.push(line.slice(index, index + limit));
+    }
+  }
+  if (current) {
+    chunks.push(current);
+  }
+  return chunks;
+}
+
 function formatFeishuNoticeLine(line: string): string[] {
   const lines = formatFeishuOutboundMarkdown(line).split("\n").filter(Boolean);
   return lines.map((item, index) => (index === 0 ? `- ${item}` : `  ${item}`));
@@ -1294,6 +1378,7 @@ async function sendFeishuMarkdown(config: SkillSpaceConfig, markdown: string): P
   }
 
   const outboundMarkdown = formatFeishuOutboundMarkdown(markdown);
+  const chunks = splitFeishuText(outboundMarkdown, feishuMessageChunkLimit);
   feishuDeliveryStatus = "sending";
   feishuDeliveryDetail = "正在发送飞书消息。";
   try {
@@ -1301,7 +1386,9 @@ async function sendFeishuMarkdown(config: SkillSpaceConfig, markdown: string): P
       await ensureFeishuChannel(config);
     }
     if (feishuChannel?.send && feishuRuntimeState === "connected") {
-      await feishuChannel.send(stored.receiveId, { markdown: outboundMarkdown });
+      for (const chunk of chunks) {
+        await feishuChannel.send(stored.receiveId, { markdown: chunk });
+      }
       feishuLastOutboundAt = new Date().toISOString();
       feishuDeliveryStatus = "sent";
       feishuDeliveryDetail = "飞书消息已发送。";
@@ -1358,6 +1445,16 @@ function feishuStatusLabel(status: RunSummary["status"]): string {
 }
 
 type FeishuReplyKind = "steward" | "task" | "system";
+
+class FeishuPartialSendError extends Error {
+  sentChunks: number;
+
+  constructor(message: string, sentChunks: number) {
+    super(message);
+    this.name = "FeishuPartialSendError";
+    this.sentChunks = sentChunks;
+  }
+}
 
 function feishuReplyTitle(kind: FeishuReplyKind, title?: string): string {
   const labels: Record<FeishuReplyKind, string> = {
@@ -1422,6 +1519,30 @@ function extractFeishuMessageText(rawMessage: unknown): string {
   }
 }
 
+function extractFeishuMessageId(rawMessage: unknown): string | undefined {
+  const message = asRecord(rawMessage);
+  const rawEvent = nestedRecord(message, "event");
+  const rawMessageBody = nestedRecord(message, "message");
+  const eventMessageBody = nestedRecord(rawEvent, "message");
+  return firstString(
+    message.messageId,
+    message.message_id,
+    message.id,
+    rawMessageBody.message_id,
+    rawMessageBody.messageId,
+    rawMessageBody.id,
+    eventMessageBody.message_id,
+    eventMessageBody.messageId,
+    eventMessageBody.id
+  );
+}
+
+function extractFeishuSendMessageId(result: unknown): string | undefined {
+  const record = asRecord(result);
+  const data = nestedRecord(record, "data");
+  return firstString(record.messageId, record.message_id, data.message_id, data.messageId);
+}
+
 function extractFeishuMessageTarget(rawMessage: unknown, stored: FeishuStoredConfig | null): string | undefined {
   const message = asRecord(rawMessage);
   const rawEvent = nestedRecord(message, "event");
@@ -1445,6 +1566,207 @@ function extractFeishuMessageTarget(rawMessage: unknown, stored: FeishuStoredCon
   );
 }
 
+function extractFeishuSenderId(rawMessage: unknown): string | undefined {
+  const message = asRecord(rawMessage);
+  const rawEvent = nestedRecord(message, "event");
+  const rawSender = nestedRecord(message, "sender");
+  const eventSender = nestedRecord(rawEvent, "sender");
+  const rawSenderId = nestedRecord(rawSender, "sender_id");
+  const eventSenderId = nestedRecord(eventSender, "sender_id");
+  return firstString(
+    message.senderId,
+    message.sender_id,
+    message.senderOpenId,
+    message.sender_id_open_id,
+    rawSenderId.open_id,
+    eventSenderId.open_id
+  );
+}
+
+function extractFeishuMessageType(rawMessage: unknown): string | undefined {
+  const message = asRecord(rawMessage);
+  const rawEvent = nestedRecord(message, "event");
+  const rawMessageBody = nestedRecord(message, "message");
+  const eventMessageBody = nestedRecord(rawEvent, "message");
+  return firstString(
+    message.rawContentType,
+    message.messageType,
+    message.message_type,
+    message.msgType,
+    message.msg_type,
+    rawMessageBody.message_type,
+    rawMessageBody.msg_type,
+    eventMessageBody.message_type,
+    eventMessageBody.msg_type
+  )?.toLowerCase();
+}
+
+function extractFeishuMessageCreateTime(rawMessage: unknown): string | undefined {
+  const message = asRecord(rawMessage);
+  const rawEvent = nestedRecord(message, "event");
+  const eventMessage = nestedRecord(rawEvent, "message");
+  return firstString(message.create_time, message.createTime, eventMessage.create_time, eventMessage.createTime);
+}
+
+function isRecentlyHandledFeishuMessage(messageId: string | undefined, fallbackKey?: string): boolean {
+  const key = messageId || fallbackKey;
+  if (!key) {
+    return false;
+  }
+  const now = Date.now();
+  for (const [id, expiresAt] of feishuHandledMessageIds) {
+    if (expiresAt <= now) {
+      feishuHandledMessageIds.delete(id);
+    }
+  }
+  if (feishuHandledMessageIds.has(key)) {
+    return true;
+  }
+  feishuHandledMessageIds.set(key, now + 10 * 60_000);
+  return false;
+}
+
+function shouldIgnoreFeishuMessage(rawMessage: unknown, content: string, messageId: string | undefined): boolean {
+  const senderId = extractFeishuSenderId(rawMessage);
+  const createdAt = extractFeishuMessageCreateTime(rawMessage) ?? String(Math.floor(Date.now() / 30_000));
+  const fallbackKey =
+    !messageId && content.trim()
+      ? createHash("sha256")
+          .update(`${senderId ?? "unknown"}:${createdAt}:${stripInlineMarkdown(content).trim().slice(0, 500)}`)
+          .digest("hex")
+      : undefined;
+  if (isRecentlyHandledFeishuMessage(messageId, fallbackKey)) {
+    return true;
+  }
+
+  const botOpenId = feishuChannel?.botIdentity?.openId;
+  if (senderId && botOpenId && senderId === botOpenId) {
+    return true;
+  }
+
+  const messageType = extractFeishuMessageType(rawMessage);
+  const normalizedContent = stripInlineMarkdown(content);
+  if (
+    (messageType === "post" || messageType === "interactive") &&
+    (/^Skill-Space\s*[·|]/i.test(normalizedContent) || /发送时间：/.test(normalizedContent))
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function feishuRichPost(title: string, text: string): object {
+  const content = formatFeishuOutboundMarkdown(text)
+    .split("\n")
+    .map((line) => [{ tag: "text", text: line || " " }]);
+  return {
+    zh_cn: {
+      title,
+      content
+    }
+  };
+}
+
+function feishuReplyPlainTitle(kind: FeishuReplyKind, title?: string): string {
+  const labels: Record<FeishuReplyKind, string> = {
+    steward: "管家回复",
+    task: "任务回复",
+    system: "系统通知"
+  };
+  return `Skill-Space · ${labels[kind]}${title ? ` | ${title}` : ""}`;
+}
+
+async function updateFeishuPostMessage(messageId: string, title: string, text: string): Promise<void> {
+  if (feishuChannel?.rawClient?.im?.v1?.message?.update) {
+    await feishuChannel.rawClient.im.v1.message.update({
+      path: { message_id: messageId },
+      data: {
+        msg_type: "post",
+        content: JSON.stringify(feishuRichPost(title, text))
+      }
+    });
+    return;
+  }
+  await feishuChannel?.editMessage?.(messageId, stripInlineMarkdown(text));
+}
+
+async function addFeishuProcessingReaction(messageId: string): Promise<boolean> {
+  if (!feishuChannel?.addReaction) {
+    return false;
+  }
+
+  for (const emojiType of feishuReceiptEmojiCandidates) {
+    try {
+      await feishuChannel.addReaction(messageId, emojiType);
+      return true;
+    } catch {
+      // Feishu tenants may expose different emoji identifiers, so try the next known value.
+    }
+  }
+  return false;
+}
+
+function feishuPostBodyWithoutDuplicateTitle(outbound: string): string {
+  return formatFeishuOutboundMarkdown(outbound)
+    .replace(/^\*\*Skill-Space\s*·\s*.+?\*\*\s*\n+/i, "")
+    .trim();
+}
+
+async function sendFeishuPostReplyChunks(
+  target: string,
+  inboundMessageId: string | undefined,
+  title: string,
+  outbound: string
+): Promise<number> {
+  if (!feishuChannel?.send) {
+    throw new Error("Feishu channel is not connected.");
+  }
+
+  const bodyChunks = splitFeishuText(feishuPostBodyWithoutDuplicateTitle(outbound), feishuMessageChunkLimit);
+  const total = bodyChunks.length;
+  let sentChunks = 0;
+  for (let index = 0; index < total; index += 1) {
+    const chunkTitle = total > 1 ? `${title} (${index + 1}/${total})` : title;
+    const chunkBody = index === 0 ? bodyChunks[index] : [`续 ${index + 1}/${total}`, "", bodyChunks[index]].join("\n");
+    try {
+      await feishuChannel.send(
+        target,
+        { post: feishuRichPost(chunkTitle, chunkBody) },
+        inboundMessageId ? { replyTo: inboundMessageId, replyInThread: false } : undefined
+      );
+      sentChunks += 1;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new FeishuPartialSendError(message, sentChunks);
+    }
+  }
+  return sentChunks;
+}
+
+function extractFeishuSenderName(rawMessage: unknown): string {
+  const message = asRecord(rawMessage);
+  const rawEvent = nestedRecord(message, "event");
+  const rawSender = nestedRecord(message, "sender");
+  const eventSender = nestedRecord(rawEvent, "sender");
+  const rawSenderId = nestedRecord(rawSender, "sender_id");
+  const eventSenderId = nestedRecord(eventSender, "sender_id");
+  return (
+    firstString(
+      message.senderName,
+      message.sender_name,
+      rawSender.name,
+      eventSender.name,
+      rawSenderId.open_id,
+      eventSenderId.open_id
+    ) ?? "Feishu"
+  );
+}
+
+function feishuAgentLabel(config: SkillSpaceConfig): string {
+  const agent = config.agents[config.defaultRuntime] ?? config.agents.claude;
+  return agent?.label || "Claude Code";
+}
+
 async function findWaitingRun(config: SkillSpaceConfig): Promise<RunSummary | null> {
   const waitingRuns = await listWaitingRuns(config);
   return waitingRuns[0] ?? null;
@@ -1458,6 +1780,12 @@ async function listWaitingRuns(config: SkillSpaceConfig): Promise<RunSummary[]> 
 function isLikelyWaitingRunReply(content: string): boolean {
   const text = content.trim();
   if (!text) {
+    return false;
+  }
+  if (looksLikeSkillRunRequest(text)) {
+    return false;
+  }
+  if (/^Skill-Space\s*[·|]/i.test(stripInlineMarkdown(text))) {
     return false;
   }
   if (/^(你好|您好|hi|hello|hey|在吗|现在几点|几点了|你是谁|你能做什么)[？?。！!,.，\s]*$/i.test(text)) {
@@ -1476,8 +1804,18 @@ function isLikelyWaitingRunReply(content: string): boolean {
   ].some((pattern) => pattern.test(text));
 }
 
+function looksLikeSkillRunRequest(content: string): boolean {
+  const text = content.trim();
+  return [
+    /(?:执行|运行|启动|调用|打开|添加|新增|安装).{0,16}(?:第?\s*[1-9一二两三四五六七八九]\s*个?)?技能/i,
+    /(?:执行|运行|启动|调用|打开|添加|新增|安装).{0,16}(?:skill|workflow|工作流)/i,
+    /第\s*[1-9一二两三四五六七八九]\s*个技能/i,
+    /^\/skill\s+run\b/i
+  ].some((pattern) => pattern.test(text));
+}
+
 function summarizeWaitingRun(run: RunSummary): string {
-  const message = formatFeishuOutboundMarkdown(truncateForLog(run.lastMessage ?? "这个任务正在等待你的确认。", 1_200));
+  const message = formatWaitingMessagePreview(run, 1_200);
   return [`任务：${run.skillName}`, `运行 ID：${run.runId}`, `等待事项：${message}`].join("\n");
 }
 
@@ -1487,21 +1825,112 @@ function summarizeWaitingRuns(runs: RunSummary[]): string {
   }
   return runs
     .slice(0, 8)
-    .map((run, index) => {
-      const message = formatFeishuOutboundMarkdown(truncateForLog(run.lastMessage ?? "等待确认", 420))
-        .split("\n")
-        .slice(0, 8)
-        .join("\n  ");
-      return `${index + 1}. ${run.skillName}\n  运行 ID：${run.runId}\n  等待事项：${message}`;
-    })
+    .map((run, index) => summarizeWaitingRunBrief(run, index))
     .join("\n\n");
+}
+
+function chineseChoiceToNumber(value: string): string | undefined {
+  const direct = value.match(/[1-9]/)?.[0];
+  if (direct) {
+    return direct;
+  }
+  const map: Record<string, string> = {
+    一: "1",
+    二: "2",
+    两: "2",
+    三: "3",
+    四: "4",
+    五: "5",
+    六: "6",
+    七: "7",
+    八: "8",
+    九: "9"
+  };
+  const match = value.match(/[一二两三四五六七八九]/)?.[0];
+  return match ? map[match] : undefined;
+}
+
+function extractWaitingChoiceNumber(content: string): string | undefined {
+  const text = content.trim();
+  if (looksLikeSkillRunRequest(text)) {
+    return undefined;
+  }
+  const explicit =
+    text.match(/(?:选题|选项|方案|选择|采用|用|按|就|第)\s*([1-9一二两三四五六七八九])\s*(?:个|项|条|题|号|方案)?/i) ??
+    text.match(/^([1-9一二两三四五六七八九])$/);
+  return explicit ? chineseChoiceToNumber(explicit[1]) : undefined;
+}
+
+function waitingRunHasNumberedChoices(run: RunSummary): boolean {
+  const message = run.lastMessage ?? "";
+  return /(?:回复数字\s*1-5|选题编号|候选选题|【[1-9]】|[1-9][.、]\s|[1-9]️⃣)/.test(message);
+}
+
+function extractWaitingOptions(message: string): string[] {
+  const options: string[] = [];
+  const seen = new Set<string>();
+  const patterns = [
+    /(?:^|\n)\s*(?:\*\*)?【([1-9])】(.+?)(?:\*\*)?(?=\n|$)/g,
+    /(?:^|\n)\s*([1-9])[.、]\s*(.+?)(?=\n|$)/g,
+    /(?:^|\n)\s*([1-9])️⃣\s*(.+?)(?=\n|$)/g
+  ];
+  for (const pattern of patterns) {
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(message)) && options.length < 9) {
+      const index = match[1];
+      const title = stripInlineMarkdown(match[2] ?? "")
+        .replace(/^[：:\s-]+/, "")
+        .trim()
+        .slice(0, 80);
+      if (!title || seen.has(index)) {
+        continue;
+      }
+      seen.add(index);
+      options.push(`${index}. ${title}`);
+    }
+  }
+  return options;
+}
+
+function formatWaitingMessagePreview(run: RunSummary, limit = 700): string {
+  const options = extractWaitingOptions(run.lastMessage ?? "");
+  if (options.length > 0) {
+    return ["可选项：", ...options].join("\n");
+  }
+  return formatFeishuOutboundMarkdown(truncateForLog(run.lastMessage ?? "等待确认", limit))
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(0, 10)
+    .join("\n");
+}
+
+function summarizeWaitingRunBrief(run: RunSummary, index: number): string {
+  const shortId = run.runId.slice(0, 8);
+  const preview = formatWaitingMessagePreview(run, 500)
+    .split("\n")
+    .slice(0, 8)
+    .map((line) => `  ${line}`)
+    .join("\n");
+  return [`任务${index + 1}：${run.skillName} (${shortId})`, preview].filter(Boolean).join("\n");
+}
+
+function normalizeWaitingReplyForRun(reply: string, run: RunSummary): string {
+  const choice = extractWaitingChoiceNumber(reply);
+  if (choice && waitingRunHasNumberedChoices(run)) {
+    return choice;
+  }
+  return reply.trim();
 }
 
 function pickWaitingRunReply(content: string, runs: RunSummary[]): { run: RunSummary; reply: string } | null {
   const text = content.trim();
+  if (looksLikeSkillRunRequest(text) && !/^(?:任务|task|run|回复)/i.test(text)) {
+    return null;
+  }
   const match =
-    text.match(/^(?:任务|task|run)\s*([0-9]+|[a-f0-9-]{8,})\s*[:：,\s-]\s*(.+)$/i) ??
-    text.match(/^回复(?:任务)?\s*([0-9]+|[a-f0-9-]{8,})\s*[:：,\s-]\s*(.+)$/i);
+    text.match(/^(?:任务|task|run)\s*([a-f0-9-]{8,}|[0-9]+)\s*(?:的)?\s*(?:选题|选项|方案|选择|确认|回复|用|采用|按)?\s*[:：,\s-]?\s*(.+)$/i) ??
+    text.match(/^回复(?:任务)?\s*([a-f0-9-]{8,}|[0-9]+)\s*(?:的)?\s*(?:选题|选项|方案|选择|确认)?\s*[:：,\s-]?\s*(.+)$/i);
   if (!match) {
     return null;
   }
@@ -1513,16 +1942,94 @@ function pickWaitingRunReply(content: string, runs: RunSummary[]): { run: RunSum
   const run =
     (/^\d+$/.test(token) ? runs[Number(token) - 1] : undefined) ??
     runs.find((item) => item.runId.toLowerCase().startsWith(token.toLowerCase()));
-  return run ? { run, reply } : null;
+  return run ? { run, reply: normalizeWaitingReplyForRun(reply, run) } : null;
+}
+
+function pickNumberedChoiceWaitingRun(content: string, runs: RunSummary[]): { run: RunSummary; reply: string } | null {
+  const choice = extractWaitingChoiceNumber(content);
+  if (!choice) {
+    return null;
+  }
+  const candidates = runs.filter(waitingRunHasNumberedChoices);
+  if (candidates.length === 0) {
+    return null;
+  }
+
+  const today = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).format(new Date());
+  const text = content.toLowerCase();
+  const scored = candidates
+    .map((run, index) => {
+      const message = run.lastMessage ?? "";
+      const score =
+        (message.includes(today) ? 8 : 0) +
+        (/今日|今天|选题|公众号|北陌|文章/.test(content) && /今日|今天|选题|公众号|文章/.test(message) ? 6 : 0) +
+        (text.includes(run.skillName.toLowerCase()) ? 5 : 0) +
+        Math.max(0, 5 - index);
+      return { run, score };
+    })
+    .sort((a, b) => b.score - a.score);
+
+  if (scored.length === 1 || scored[0].score > scored[1].score) {
+    return { run: scored[0].run, reply: choice };
+  }
+  return null;
+}
+
+function pickResolvedWaitingRunReply(content: string, runs: RunSummary[]): { run: RunSummary; reply: string; reason: string } | null {
+  if (looksLikeSkillRunRequest(content) && !/^(?:任务|task|run|回复)/i.test(content.trim())) {
+    return null;
+  }
+  const explicit = pickWaitingRunReply(content, runs);
+  if (explicit) {
+    return { ...explicit, reason: "用户明确指定了等待任务编号或运行 ID。" };
+  }
+  const numbered = pickNumberedChoiceWaitingRun(content, runs);
+  if (numbered) {
+    return { ...numbered, reason: "根据选题编号和等待任务内容自动匹配到最相关任务。" };
+  }
+  return null;
+}
+
+function isGenericWaitingConfirmation(content: string): boolean {
+  return /^(?:确认|同意|可以|继续|通过|批准|发布|完成|没问题|行|好|ok|yes|y)[。！!,.，\s]*$/i.test(content.trim());
+}
+
+function resolveIntentWaitingRun(
+  intent: FeishuIntent,
+  waitingRuns: RunSummary[]
+): { run: RunSummary; reply: string; reason: string } | null {
+  if (intent.action !== "reply_waiting") {
+    return null;
+  }
+  if (looksLikeSkillRunRequest(intent.input ?? intent.reply ?? intent.waitingReply ?? "")) {
+    return null;
+  }
+  const run =
+    (typeof intent.runIndex === "number" ? waitingRuns[intent.runIndex - 1] : undefined) ??
+    (intent.runId ? waitingRuns.find((item) => item.runId.toLowerCase().startsWith(intent.runId!.toLowerCase())) : undefined);
+  const rawReply = intent.waitingReply?.trim() || intent.reply?.trim() || intent.input?.trim();
+  if (!run || !rawReply) {
+    return null;
+  }
+  return {
+    run,
+    reply: normalizeWaitingReplyForRun(rawReply, run),
+    reason: "LLM 管家根据上下文判断这是等待任务回复，并通过安全校验。"
+  };
 }
 
 function formatWaitingRunChoices(runs: RunSummary[]): string {
   return [
-    "当前有多个任务正在等待确认，请先指定要回复哪个任务：",
+    "当前有多个任务在等待确认，我需要先知道你要回复哪一个：",
     "",
     summarizeWaitingRuns(runs),
     "",
-    "回复示例：任务1：A / 任务2：确认发布 / run 1234abcd: 选择方案B"
+    "回复示例：任务2：选题4 / 任务1：确认 / run 1234abcd: 方案B"
   ].join("\n");
 }
 
@@ -1573,6 +2080,37 @@ function formatFeishuRunStatus(runs: RunSummary[]): string {
     .join("\n");
 }
 
+function asksForRunDiagnostics(content: string): boolean {
+  return /(?:失败|报错|错误|原因|日志|为什么|具体|排查|诊断|fail|error|log)/i.test(content);
+}
+
+function formatFeishuRunDiagnostics(runs: RunSummary[]): string {
+  const candidates = runs
+    .filter((run) => run.status === "failed" || run.diagnostic || /(?:error|failed|失败|报错|异常)/i.test(run.lastMessage ?? ""))
+    .slice(0, 5);
+  if (candidates.length === 0) {
+    const latest = runs[0];
+    return latest
+      ? `最近没有明确失败的任务。\n\n最近任务：${latest.skillName}\n状态：${feishuStatusLabel(latest.status)}\n时间：${formatFeishuTime(new Date(latest.startedAt))}`
+      : "暂无运行历史，暂时没有可分析的失败原因。";
+  }
+
+  return candidates
+    .map((run, index) =>
+      [
+        `${index + 1}. ${run.skillName}`,
+        `状态：${feishuStatusLabel(run.status)}`,
+        `时间：${formatFeishuTime(new Date(run.startedAt))}`,
+        `运行 ID：${run.runId.slice(0, 8)}`,
+        run.diagnostic ? `诊断：${run.diagnostic}` : "",
+        run.lastMessage ? `日志摘要：${truncateForLog(stripInlineMarkdown(run.lastMessage), 900)}` : ""
+      ]
+        .filter(Boolean)
+        .join("\n")
+    )
+    .join("\n\n");
+}
+
 function extractJsonObject(value: string): Record<string, unknown> | null {
   const fenced = value.match(/```(?:json)?\s*([\s\S]*?)```/i);
   const candidate = fenced?.[1] ?? value.match(/\{[\s\S]*\}/)?.[0];
@@ -1591,7 +2129,7 @@ function normalizeFeishuIntent(value: Record<string, unknown> | null): FeishuInt
     return null;
   }
   const rawAction = typeof value.action === "string" ? value.action : "";
-  const actions: FeishuIntent["action"][] = ["run_skill", "list_skills", "status", "help", "chat"];
+  const actions: FeishuIntent["action"][] = ["run_skill", "list_skills", "status", "help", "chat", "reply_waiting", "clarify_waiting"];
   if (!actions.includes(rawAction as FeishuIntent["action"])) {
     return null;
   }
@@ -1600,6 +2138,9 @@ function normalizeFeishuIntent(value: Record<string, unknown> | null): FeishuInt
     skillId: typeof value.skillId === "string" ? value.skillId : undefined,
     input: typeof value.input === "string" ? value.input : undefined,
     reply: typeof value.reply === "string" ? value.reply : undefined,
+    runId: typeof value.runId === "string" ? value.runId : undefined,
+    runIndex: typeof value.runIndex === "number" ? value.runIndex : undefined,
+    waitingReply: typeof value.waitingReply === "string" ? value.waitingReply : undefined,
     confidence: typeof value.confidence === "number" ? value.confidence : undefined
   };
 }
@@ -1610,6 +2151,9 @@ function fallbackFeishuIntent(content: string, skills: SkillSummary[]): FeishuIn
   }
   if (/列表|技能|skill list|有哪些/i.test(content) && !findSkillByText(skills, content)) {
     return { action: "list_skills", confidence: 0.75 };
+  }
+  if (asksForRunDiagnostics(content)) {
+    return { action: "status", confidence: 0.76 };
   }
   if (/状态|进度|历史|status|运行/i.test(content) && !findSkillByText(skills, content)) {
     return { action: "status", confidence: 0.7 };
@@ -1707,7 +2251,13 @@ async function answerFeishuChat(
 
 async function readFeishuConversation(config: SkillSpaceConfig): Promise<LlmConversationMessage[]> {
   const messages = await readJsonFile<LlmConversationMessage[]>(feishuConversationPath(config));
-  return (messages ?? []).filter((item) => item.role === "user" || item.role === "assistant").slice(-20);
+  return (messages ?? [])
+    .filter((item) => item.role === "user" || item.role === "assistant")
+    .slice(-20)
+    .map((item) => ({
+      ...item,
+      content: compactFeishuConversationContent(item.role, item.content)
+    }));
 }
 
 async function appendFeishuConversation(config: SkillSpaceConfig, role: LlmConversationMessage["role"], content: string): Promise<void> {
@@ -1716,8 +2266,18 @@ async function appendFeishuConversation(config: SkillSpaceConfig, role: LlmConve
     return;
   }
   const messages = await readFeishuConversation(config);
-  messages.push({ role, content: trimmed.slice(0, 2_000), at: new Date().toISOString() });
+  messages.push({ role, content: compactFeishuConversationContent(role, trimmed), at: new Date().toISOString() });
   await writeJsonFile(feishuConversationPath(config), messages.slice(-20));
+}
+
+function compactFeishuConversationContent(role: LlmConversationMessage["role"], content: string): string {
+  const limit = role === "assistant" ? 900 : 1_200;
+  const lines = stripInlineMarkdown(content)
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const compacted = lines.slice(0, role === "assistant" ? 18 : 24).join("\n");
+  return truncateForLog(compacted || content, limit);
 }
 
 async function listFeishuDecisionLogs(config: SkillSpaceConfig): Promise<FeishuDecisionLogEntry[]> {
@@ -1775,7 +2335,8 @@ async function classifyFeishuIntent(
   content: string,
   skills: SkillSummary[],
   runs: RunSummary[],
-  conversation: LlmConversationMessage[]
+  conversation: LlmConversationMessage[],
+  waitingRuns: RunSummary[] = []
 ): Promise<FeishuIntent> {
   const fallback = fallbackFeishuIntent(content, skills);
   const llmConfig = (await readLlmConfig(config)) ?? defaultLlmConfig();
@@ -1788,8 +2349,15 @@ async function classifyFeishuIntent(
       config,
       [
         "你是 Skill-Space 的飞书入口调度器。请理解用户从手机飞书发来的自然语言，决定应该查看技能、查看状态、启动技能，还是普通回复。",
+        "你也是等待任务回复调度器：如果用户是在回复某个等待确认任务，请输出 reply_waiting，并给出 runIndex 或 runId，以及真正要发给任务的 waitingReply。",
+        "如果用户说“执行第6个技能”“运行某个技能”“启动工作流”，这是 run_skill，不是等待任务回复，即使里面有数字也不要输出 reply_waiting。",
+        "安全规则：当有多个等待任务，而用户只说“可以、确认、继续、好、OK”这类泛化确认时，不要猜目标，请输出 clarify_waiting。",
+        "安全规则：只有用户明确给出任务编号、运行 ID、选题编号，或上下文能唯一对应一个等待任务时，才输出 reply_waiting。",
         "只输出 JSON，不要输出 Markdown 或解释。",
-        'JSON schema: {"action":"run_skill|list_skills|status|help|chat","skillId":"可选，必须来自 skills.id","input":"传给技能的用户原始目标或参数","reply":"普通回复内容","confidence":0.0}',
+        'JSON schema: {"action":"run_skill|list_skills|status|help|chat|reply_waiting|clarify_waiting","skillId":"可选，必须来自 skills.id","input":"传给技能的用户原始目标或参数","reply":"普通回复内容","runIndex":1,"runId":"可选","waitingReply":"要发送给等待任务的短回复，例如 4、确认、方案B","confidence":0.0}',
+        "",
+        "等待确认任务（编号从 1 开始，用户可能说“任务2选4”“第二个用4”“刚才那个确认”）：",
+        summarizeWaitingRuns(waitingRuns),
         "",
         "可用技能：",
         JSON.stringify(
@@ -1849,7 +2417,7 @@ async function dispatchFeishuIntent(
   }
 
   if (intent.action === "status") {
-    await sendReply(formatFeishuRunStatus(runs), "steward", "运行状态");
+    await sendReply(asksForRunDiagnostics(content) ? formatFeishuRunDiagnostics(runs) : formatFeishuRunStatus(runs), "steward", "运行状态");
     return;
   }
 
@@ -1873,44 +2441,99 @@ async function dispatchFeishuIntent(
 
 async function handleFeishuMessage(config: SkillSpaceConfig, rawMessage: unknown): Promise<void> {
   const content = extractFeishuMessageText(rawMessage);
-
+  const sender = extractFeishuSenderName(rawMessage);
   const stored = await readFeishuConfig(config);
   const target = extractFeishuMessageTarget(rawMessage, stored);
+  const inboundMessageId = extractFeishuMessageId(rawMessage);
   if (!target) {
     return;
   }
+  if (shouldIgnoreFeishuMessage(rawMessage, content, inboundMessageId)) {
+    return;
+  }
+
+  const sendProcessingReceipt = async (): Promise<void> => {
+    feishuLastReplyPreview = "已收到，处理中";
+    feishuProcessing = true;
+    try {
+      const marked = inboundMessageId ? await addFeishuProcessingReaction(inboundMessageId) : false;
+      feishuDeliveryStatus = "received";
+      feishuDeliveryDetail = marked ? "已在原消息上标记收到，正在处理。" : "已收到飞书消息，正在处理。";
+    } catch (error) {
+      feishuLastError = error instanceof Error ? error.message : String(error);
+      feishuDeliveryStatus = "failed";
+      feishuDeliveryDetail = feishuLastError;
+    }
+  };
 
   const sendReply = async (text: string, kind: FeishuReplyKind = "steward", title?: string): Promise<void> => {
     const outbound = wrapFeishuReply(text, kind, title);
+    const plainTitle = feishuReplyPlainTitle(kind, title);
     if (feishuChannel?.send) {
       feishuDeliveryStatus = "sending";
       feishuDeliveryDetail = "正在发送飞书回复。";
       try {
-        await feishuChannel.send(target, { markdown: formatFeishuOutboundMarkdown(outbound) });
+        await sendFeishuPostReplyChunks(target, inboundMessageId, plainTitle, outbound);
         feishuLastOutboundAt = new Date().toISOString();
         feishuDeliveryStatus = "sent";
         feishuDeliveryDetail = "飞书回复已发送。";
+        feishuLastReplyPreview = truncateForLog(text, 500);
+        feishuLastReplyAt = feishuLastOutboundAt;
+        feishuProcessing = false;
         await appendFeishuConversation(config, "assistant", text);
         return;
       } catch (error) {
         feishuLastError = error instanceof Error ? error.message : String(error);
         feishuDeliveryStatus = "failed";
         feishuDeliveryDetail = feishuLastError;
+        feishuProcessing = false;
+        if (error instanceof FeishuPartialSendError && error.sentChunks > 0) {
+          feishuDeliveryDetail = `飞书回复已发送 ${error.sentChunks} 段，后续内容发送失败：${feishuLastError}`;
+          feishuLastReplyPreview = truncateForLog(text, 500);
+          feishuLastReplyAt = new Date().toISOString();
+          await appendFeishuConversation(config, "assistant", text);
+          return;
+        }
+        if (inboundMessageId) {
+          for (const chunk of splitFeishuText(formatFeishuOutboundMarkdown(outbound), feishuMessageChunkLimit)) {
+            await feishuChannel.send(target, { markdown: chunk }, { replyTo: inboundMessageId, replyInThread: false });
+          }
+          feishuLastOutboundAt = new Date().toISOString();
+          feishuDeliveryStatus = "sent";
+          feishuDeliveryDetail = "飞书回复已发送。";
+          feishuLastReplyPreview = truncateForLog(text, 500);
+          feishuLastReplyAt = feishuLastOutboundAt;
+          feishuProcessing = false;
+          await appendFeishuConversation(config, "assistant", text);
+          return;
+        }
         throw error;
       }
     }
     await sendFeishuMarkdown(config, outbound);
+    feishuLastReplyPreview = truncateForLog(text, 500);
+    feishuLastReplyAt = new Date().toISOString();
+    feishuProcessing = false;
     await appendFeishuConversation(config, "assistant", text);
   };
 
   if (!content) {
     return;
   }
+  feishuLastInboundAt = new Date().toISOString();
+  feishuLastInboundText = truncateForLog(content, 500);
+  feishuLastInboundSender = sender;
+  feishuLastReplyPreview = undefined;
+  feishuLastReplyAt = undefined;
+  feishuProcessing = true;
+  feishuDeliveryStatus = "received";
+  feishuDeliveryDetail = "已收到飞书消息，正在处理。";
+  await sendProcessingReceipt();
   await appendFeishuConversation(config, "user", content);
 
   if (!content.startsWith("/skill")) {
     const waitingRuns = await listWaitingRuns(config);
-    const pickedWaitingReply = pickWaitingRunReply(content, waitingRuns);
+    const pickedWaitingReply = pickResolvedWaitingRunReply(content, waitingRuns);
     if (pickedWaitingReply && isLikelyWaitingRunReply(pickedWaitingReply.reply)) {
       try {
         await continueRun(config, {
@@ -1919,7 +2542,7 @@ async function handleFeishuMessage(config: SkillSpaceConfig, rawMessage: unknown
         });
         await appendFeishuDecisionLog(config, {
           action: "waiting_reply",
-          reason: "用户明确指定了等待任务编号或运行 ID。",
+          reason: pickedWaitingReply.reason,
           message: content,
           runId: pickedWaitingReply.run.runId,
           replyPreview: pickedWaitingReply.reply
@@ -1930,15 +2553,6 @@ async function handleFeishuMessage(config: SkillSpaceConfig, rawMessage: unknown
         feishuLastError = message;
         await sendReply(`收到「${pickedWaitingReply.reply}」，但转发到任务失败：${message}`, "task", "转发失败");
       }
-      return;
-    }
-    if (waitingRuns.length > 1 && isLikelyWaitingRunReply(content)) {
-      await appendFeishuDecisionLog(config, {
-        action: "waiting_ambiguous",
-        reason: "用户回复像确认选项，但当前有多个等待任务，无法安全判断目标。",
-        message: content
-      });
-      await sendReply(formatWaitingRunChoices(waitingRuns), "system", "请选择任务");
       return;
     }
     if (waitingRuns.length === 1 && isLikelyWaitingRunReply(content)) {
@@ -1966,15 +2580,71 @@ async function handleFeishuMessage(config: SkillSpaceConfig, rawMessage: unknown
     const skills = await scanSkills(config);
     const runs = await listRuns(config);
     const conversation = await readFeishuConversation(config);
-    const intent = await classifyFeishuIntent(config, content, skills, runs, conversation);
+    const intent = await classifyFeishuIntent(config, content, skills, runs, conversation, waitingRuns);
     await appendFeishuDecisionLog(config, {
       action: intent.action,
       reason: intent.confidence ? "LLM 或本地规则完成意图分类。" : "使用本地默认分类。",
       message: content,
       skillId: intent.skillId,
       confidence: intent.confidence,
-      replyPreview: intent.reply
+      runId: intent.runId,
+      replyPreview: intent.waitingReply ?? intent.reply
     });
+
+    if (intent.action === "clarify_waiting") {
+      await sendReply(formatWaitingRunChoices(waitingRuns), "system", "请选择任务");
+      return;
+    }
+
+    const intentWaitingReply = resolveIntentWaitingRun(intent, waitingRuns);
+    if (intentWaitingReply) {
+      if (
+        waitingRuns.length > 1 &&
+        isGenericWaitingConfirmation(content) &&
+        !/任务|task|run|第|选题|选项|方案|选择|采用|用|按|刚才|上一个|最近/i.test(content)
+      ) {
+        await appendFeishuDecisionLog(config, {
+          action: "waiting_ambiguous",
+          reason: "LLM 给出了等待任务目标，但用户是泛化确认；为避免误操作要求用户明确指定任务。",
+          message: content
+        });
+        await sendReply(formatWaitingRunChoices(waitingRuns), "system", "请选择任务");
+        return;
+      }
+
+      try {
+        await continueRun(config, {
+          runId: intentWaitingReply.run.runId,
+          input: intentWaitingReply.reply
+        });
+        await appendFeishuDecisionLog(config, {
+          action: "waiting_reply",
+          reason: intentWaitingReply.reason,
+          message: content,
+          runId: intentWaitingReply.run.runId,
+          confidence: intent.confidence,
+          replyPreview: intentWaitingReply.reply
+        });
+        await sendReply(`已把「${intentWaitingReply.reply}」发送到任务：${intentWaitingReply.run.skillName}`, "task", "已转发确认");
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        feishuLastError = message;
+        await sendReply(`收到「${intentWaitingReply.reply}」，但转发到任务失败：${message}`, "task", "转发失败");
+      }
+      return;
+    }
+
+    if (waitingRuns.length > 1 && isLikelyWaitingRunReply(content)) {
+      await appendFeishuDecisionLog(config, {
+        action: "waiting_ambiguous",
+        reason: "管家没有可靠锁定目标，且用户消息像确认选项；要求用户明确指定任务。",
+        message: content,
+        confidence: intent.confidence
+      });
+      await sendReply(formatWaitingRunChoices(waitingRuns), "system", "请选择任务");
+      return;
+    }
+
     await dispatchFeishuIntent(config, content, intent, sendReply, conversation, waitingRuns);
     return;
   }
@@ -2039,6 +2709,31 @@ async function listSkillChanges(config: SkillSpaceConfig): Promise<SkillChange[]
   return (changes ?? []).sort((a, b) => b.detectedAt.localeCompare(a.detectedAt));
 }
 
+function describeSkillChange(previous: SkillSummary, skill: SkillSummary): { summary: string; changedFields: string[] } {
+  const changedFields: string[] = [];
+  const parts: string[] = [];
+
+  if (previous.version !== skill.version) {
+    changedFields.push("version");
+    parts.push(`版本 ${previous.version} -> ${skill.version}`);
+  }
+  if (previous.description !== skill.description) {
+    changedFields.push("description");
+    parts.push(`说明更新：${skill.description || "暂无说明"}`);
+  }
+  if (previous.updatedAt !== skill.updatedAt) {
+    changedFields.push("content");
+    if (previous.description === skill.description && previous.version === skill.version) {
+      parts.push("文件内容已更新，但版本和说明未变化。");
+    }
+  }
+
+  return {
+    summary: parts.join("；") || "内容更新",
+    changedFields
+  };
+}
+
 async function recordSkillChanges(config: SkillSpaceConfig, skills: SkillSummary[]): Promise<void> {
   const previousIndex = await readJsonFile<{ skills?: SkillSummary[] }>(registryIndexPath(config));
   const previousSkills = new Map((previousIndex?.skills ?? []).map((skill) => [skill.id, skill]));
@@ -2058,11 +2753,14 @@ async function recordSkillChanges(config: SkillSpaceConfig, skills: SkillSummary
         return null;
       }
 
+      const { summary, changedFields } = describeSkillChange(previous, skill);
       return {
         id: `${skill.id}-${detectedAt}`,
         skillId: skill.id,
         skillName: skill.name,
         detectedAt,
+        summary,
+        changedFields,
         before: {
           version: previous.version,
           updatedAt: previous.updatedAt,
@@ -2404,6 +3102,22 @@ async function detectTemplateRequirements(
   };
 }
 
+async function auditPreparedTemplatePackage(packageRoot: string, warnings: string[]): Promise<void> {
+  const corpus = await readPublishTextCorpus(packageRoot);
+  const checks: Array<{ pattern: RegExp; message: string }> = [
+    { pattern: /[A-Za-z]:\\Users\\|C:\\Users\\/i, message: "发布包仍包含 Windows 用户路径，请检查模板化是否完整。" },
+    { pattern: /\/(?:Users|home)\/[A-Za-z0-9_.-]+\//i, message: "发布包仍包含 Unix/macOS 用户路径，请检查模板化是否完整。" },
+    { pattern: /\b(?:sk-[A-Za-z0-9_-]{20,}|sk-proj-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{20,})\b/, message: "发布包仍包含疑似密钥或令牌。" },
+    { pattern: /\b(?:api[_-]?key|token|secret|password)\s*[:=]\s*["']?(?!\{\{secret\.)[A-Za-z0-9_./+=-]{12,}/i, message: "发布包仍包含疑似明文敏感配置。" },
+    { pattern: /(?:公众号名称|公众号|账号|账户)\s*[:：=]\s*(?!\{\{text\.)[^\n{}]{2,80}/i, message: "发布包可能仍包含具体账号或公众号信息。" }
+  ];
+  for (const check of checks) {
+    if (check.pattern.test(corpus) && !warnings.includes(check.message)) {
+      warnings.push(check.message);
+    }
+  }
+}
+
 function runSummaryPath(config: SkillSpaceConfig, runId: string): string {
   return join(config.runsRoot, runId, "run.json");
 }
@@ -2413,7 +3127,10 @@ async function writeRunSummary(summary: RunSummary): Promise<void> {
 }
 
 async function normalizeRunSummaryFromLog(run: RunSummary): Promise<RunSummary> {
-  if (run.status !== "waiting_input" || !run.endedAt || run.exitCode !== 0 || !existsSync(run.logPath)) {
+  if (shouldTreatRunAsCompleted(run)) {
+    return { ...run, status: "completed" };
+  }
+  if (!["waiting_input", "failed"].includes(run.status) || !run.endedAt || run.exitCode !== 0 || !existsSync(run.logPath)) {
     return run;
   }
 
@@ -2430,7 +3147,10 @@ async function normalizeRunSummaryFromLog(run: RunSummary): Promise<RunSummary> 
       }
     }
     const finalAssistantMessage = assistantMessages.at(-1);
-    if (finalAssistantMessage && !isUserDecisionRequest(finalAssistantMessage)) {
+    if (
+      finalAssistantMessage &&
+      (isCompletionReportMessage(finalAssistantMessage) || !isActionableUserDecisionRequest(finalAssistantMessage))
+    ) {
       return { ...run, status: "completed", lastMessage: finalAssistantMessage };
     }
   } catch {
@@ -2453,7 +3173,7 @@ async function listRuns(config: SkillSpaceConfig): Promise<RunSummary[]> {
     runs
       .filter((run): run is RunSummary => Boolean(run))
       .map((run) =>
-        run.status === "waiting_input" && run.endedAt && run.lastMessage && !isUserDecisionRequest(run.lastMessage)
+        shouldTreatRunAsCompleted(run)
           ? { ...run, status: "completed" as const }
           : normalizeRunSummaryFromLog(run)
       )
@@ -2734,6 +3454,7 @@ async function prepareSkillPackage(config: SkillSpaceConfig, skillId: string): P
   const existingInputSchema = await readOptionalJson(join(targetRoot, ".skillspace", "inputs.schema.json"));
   const variableList = mergeTemplateVariables([...variables.values(), ...inputSchemaVariables(existingInputSchema)]);
   const requirements = await detectTemplateRequirements(targetRoot, variableList, dependencyBundle.dependencies);
+  await auditPreparedTemplatePackage(targetRoot, warnings);
   const metadataRoot = join(targetRoot, ".skillspace");
   await mkdir(metadataRoot, { recursive: true });
   await writeJsonFile(join(metadataRoot, "dependencies.json"), {
@@ -3218,13 +3939,46 @@ async function fetchRemoteMarketplaceTemplates(): Promise<SkillTemplateListing[]
         : [];
     return templates
       .filter((item: unknown): item is SkillTemplateListing => Boolean(item && typeof item === "object" && "id" in item))
-      .map((item) => ({
-        ...item,
-        source: "remote" as const
-      }));
+      .map((item) => {
+        const record = repairMojibakeDeep(item) as SkillTemplateListing & { metricsVerified?: boolean };
+        return {
+          ...record,
+          downloads: record.metricsVerified ? Number(record.downloads || 0) : 0,
+          rating: record.metricsVerified ? Number(record.rating || 0) : 0,
+          source: "remote" as const
+        };
+      });
   } catch {
     return [];
   }
+}
+
+function countCjk(value: string): number {
+  return value.match(/[\p{Script=Han}]/gu)?.length ?? 0;
+}
+
+function repairMojibakeText(value: string): string {
+  if (!/[ÃÂâãåæçèéï]/.test(value)) {
+    return value;
+  }
+  const repaired = Buffer.from(value, "latin1").toString("utf8");
+  if (countCjk(repaired) > countCjk(value) + 1 || /(?:ã|ï¼|â)/.test(value)) {
+    return repaired;
+  }
+  return value;
+}
+
+function repairMojibakeDeep(value: unknown): unknown {
+  if (typeof value === "string") {
+    return repairMojibakeText(value);
+  }
+  if (Array.isArray(value)) {
+    return value.map(repairMojibakeDeep);
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, repairMojibakeDeep(item)]));
+  }
+  return value;
 }
 
 async function installedTemplateIds(config: SkillSpaceConfig): Promise<Set<string>> {
@@ -3242,10 +3996,34 @@ async function installedTemplateIds(config: SkillSpaceConfig): Promise<Set<strin
   return ids;
 }
 
+const supportSkillIds = new Set(["skill-space", "skill-space-capture", "skill-space-smoke-test", "system-context"]);
+
+function skillToInstalledTemplate(skill: SkillSummary): SkillTemplateListing {
+  return {
+    id: skill.id,
+    name: skill.name,
+    description: skill.description,
+    version: skill.version,
+    author: "Local",
+    category: skill.tags[0] ?? "SkillOps",
+    downloads: 0,
+    rating: 0,
+    runtimes: skill.runtimes,
+    requiredVariables: [],
+    safetyStatus: skill.hasSkillSpaceMetadata ? "ready" : "review_required",
+    updatedAt: skill.updatedAt,
+    source: "local",
+    packageRoot: skill.root,
+    installed: true
+  };
+}
+
 async function listMarketplaceTemplates(config: SkillSpaceConfig, includeRemote = true): Promise<SkillTemplateListing[]> {
   const localTemplates = await migrateLocalMarketplaceTemplates(config);
   const remoteTemplates = includeRemote ? await fetchRemoteMarketplaceTemplates() : [];
+  const installedSkills = (await scanSkills(config)).filter((skill) => !supportSkillIds.has(skill.id));
   const installedIds = await installedTemplateIds(config);
+  const installedSkillTemplates = installedSkills.map(skillToInstalledTemplate);
   const uploadedState = await readUploadedTemplateState(config);
   const localById = new Map(localTemplates.map((template) => [template.id, template]));
   const remoteIds = new Set(remoteTemplates.map((template) => template.id));
@@ -3254,13 +4032,15 @@ async function listMarketplaceTemplates(config: SkillSpaceConfig, includeRemote 
   return [
     ...remoteTemplates,
     ...localTemplates,
+    ...installedSkillTemplates,
     ...builtInTemplates
   ]
     .filter((template) => {
-      if (seen.has(template.id)) {
+      const key = `${template.source ?? "unknown"}:${template.id}`;
+      if (seen.has(key)) {
         return false;
       }
-      seen.add(template.id);
+      seen.add(key);
       return true;
     })
     .map((template) => ({
@@ -3482,6 +4262,20 @@ async function shareMarketplaceTemplate(config: SkillSpaceConfig, templateId: st
   const template = (await listMarketplaceTemplates(config, false)).find((item) => item.id === templateId);
   if (!template) {
     return { shared: false, message: "Template not found." };
+  }
+
+  const rawPackageRoot = template.packageRoot ? resolve(template.packageRoot) : undefined;
+  if (
+    template.source === "local" &&
+    rawPackageRoot &&
+    !isPathInside(marketplaceRoot(config), rawPackageRoot, true) &&
+    !isPathInside(publishRoot(config), rawPackageRoot, true)
+  ) {
+    const published = await publishSkillTemplate(config, template.id);
+    if (!published.published || !published.template) {
+      return { shared: false, message: published.message };
+    }
+    return shareMarketplaceTemplate(config, published.template.id);
   }
 
   const packageId = `${slugifySkillName(template.name || template.id)}-${template.version.replace(/[^A-Za-z0-9_.-]/g, "_")}`;
@@ -3959,6 +4753,14 @@ function compilePrompt(config: SkillSpaceConfig, skillMarkdown: string, input: s
     `Skill-Space local registry root is ${config.skillRoots[0]}.`,
     `If this run creates a new reusable skill package, create it under ${join(config.skillRoots[0], "<skill-name>")} with SKILL.md and .skillspace metadata so the desktop app can discover it automatically.`,
     "",
+    "## Human confirmation policy",
+    "Do not choose, approve, publish, delete, send, or finalize on behalf of the user when the skill asks for a user decision, topic selection, account choice, publish confirmation, or any numbered option.",
+    "If a decision is required and the current user input does not explicitly provide it, stop after presenting the exact options or confirmation question. Say clearly that you are waiting for the user to reply in Skill-Space.",
+    "Only continue through a decision step when the user input explicitly contains the choice or confirmation.",
+    "",
+    "## Completion quality gate",
+    "Before your final response, compare the result against every required item in SKILL.md. If a required non-destructive step failed, retry that step once. If it still fails or needs user input, stop and report the exact missing item, failure reason, and next action.",
+    "",
     "## SKILL.md",
     skillMarkdown,
     "",
@@ -4022,12 +4824,26 @@ function isUserDecisionRequest(message: string): boolean {
     /(?:请|需要|等待|请你|麻烦|请回复|请从|请在|请告诉我|请提供|待用户|等待用户|需要用户).{0,60}(回复|选择|确认|输入|补充|提供|决定|决策|选题|编号|序号)/i,
     /(回复|选择|确认|输入|补充|提供|决定|决策).{0,40}(即可|继续|后继续|后我|后再|选题|编号|序号)/i,
     /(?:请选择|请确认|请回复|请决定|等待确认|等待回复|等待选择|需要确认|需要选择|用户确认|用户选择|用户决策)/i,
+    /(?:以下|下面|候选|选项|方案).{0,120}(?:1[\.\、:：].{0,160}2[\.\、:：])/is,
+    /(?:请选择|请从|回复|输入).{0,80}(?:1\s*[-~至]\s*\d|[1-9]\s*[、,，/]\s*[1-9]|编号|序号|选题|候选)/i,
     /(waiting for|please|need).{0,60}(reply|input|confirmation|choice|selection|decision)/i,
     /(reply|choose|select|confirm|provide|input).{0,60}(one|option|number|choice|below|continue)/i,
     /(?:选题|候选|方案|选项).{0,180}(?:1[\.\、:：].{0,160}2[\.\、:：])/is,
-    /(?:^|\n|\s)(?:选项|候选|编号)\s*(?:1|一)[\.\、:：]/i,
-    /(?:璇|闇|绛夊緟|璇峰洖澶).{0,60}(鍥炲|閫夋嫨|纭|杈撳叆|琛ュ厖|鎻愪緵|鍐冲畾)/i
+    /(?:^|\n|\s)(?:选项|候选|编号)\s*(?:1|一)[\.\、:：]/i
   ].some((pattern) => pattern.test(message) || pattern.test(text));
+}
+
+function isCompletionReportMessage(message: string): boolean {
+  const text = powershellSingleLine(message).toLowerCase();
+  return [
+    /(?:完整\s*checklist|validation checklist|执行报告|执行总结|完整报告|最终状态\s*[:：]?.{0,12}成功|研究摘要|研究任务完成)/i,
+    /(?:all checks passed|final report|execution report|validation checklist)/i,
+    /(?:文章已同步|草稿箱|media_id|报告已保存|参考资料已整理|结构化研究摘要已输出)/i
+  ].some((pattern) => pattern.test(message) || pattern.test(text));
+}
+
+function isActionableUserDecisionRequest(message: string): boolean {
+  return isUserDecisionRequest(message) && !isCompletionReportMessage(message);
 }
 
 function isCompletionMessage(message: string): boolean {
@@ -4037,6 +4853,13 @@ function isCompletionMessage(message: string): boolean {
     /(?:completed|finished|done|success|succeeded|all checks passed|final report|execution report|no reply needed)/i,
     /(?:status|状态)\s*[:：]\s*(?:completed|done|success|已完成|完成)/i
   ].some((pattern) => pattern.test(message) || pattern.test(text));
+}
+
+function shouldTreatRunAsCompleted(run: RunSummary): boolean {
+  if (!run.endedAt || run.exitCode !== 0 || !run.lastMessage) {
+    return false;
+  }
+  return isCompletionReportMessage(run.lastMessage) || (isCompletionMessage(run.lastMessage) && !isActionableUserDecisionRequest(run.lastMessage));
 }
 
 function claudeArgsFromConfig(agent: AgentConfig, sessionId?: string): string[] {
@@ -4924,8 +5747,10 @@ async function executeRun(
   child.on("close", (code) => {
     const endedAt = new Date().toISOString();
     const canComplete = (code === 0 || codexTurnCompleted) && !outputSuggestsEmptyPrompt;
-    const lastMessageIsWaiting = lastMessage ? isUserDecisionRequest(lastMessage) : false;
-    const lastMessageCompleted = lastMessage ? isCompletionMessage(lastMessage) : false;
+    const lastMessageIsWaiting = lastMessage ? isActionableUserDecisionRequest(lastMessage) : false;
+    const lastMessageCompleted = lastMessage
+      ? isCompletionReportMessage(lastMessage) || (isCompletionMessage(lastMessage) && !lastMessageIsWaiting)
+      : false;
     const waiting = canComplete && !lastMessageCompleted && (lastMessageIsWaiting || (!lastMessage && waitingSignalSeen));
     const waitingMessage = lastMessageIsWaiting ? lastMessage : !lastMessage ? waitingSignalMessage : "";
     const status =
@@ -4961,7 +5786,7 @@ async function executeRun(
       `状态：${feishuStatusLabel(status)}`,
       `执行智能体：${runSummary.runtime}`,
       `运行 ID：${runSummary.runId}`,
-      waiting && waitingMessage ? `需要回复：${truncateForLog(waitingMessage, 600)}` : "",
+      waiting && waitingMessage ? `需要回复：${truncateForLog(waitingMessage, 8_000)}` : "",
       status === "failed" && runSummary.diagnostic ? `诊断：${runSummary.diagnostic}` : ""
     ]);
     emitRunEvent(event);
@@ -5482,11 +6307,21 @@ function createWindow(): void {
   });
 }
 
+if (!isBackgroundSchedulerProcess) {
+  const gotSingleInstanceLock = app.requestSingleInstanceLock();
+  if (!gotSingleInstanceLock) {
+    app.quit();
+    process.exit(0);
+  } else {
+    app.on("second-instance", () => showMainWindow());
+  }
+}
+
 app.whenReady().then(() => {
   app.setAppUserModelId("com.skillspace.desktop");
   configureAutoUpdater();
 
-  if (process.argv.includes("--background-scheduler")) {
+  if (isBackgroundSchedulerProcess) {
     void ensureConfig()
       .then((config) =>
         runDueSchedules(config).catch(async (error) => {

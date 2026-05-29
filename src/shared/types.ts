@@ -95,6 +95,8 @@ export interface SkillChange {
   skillId: string;
   skillName: string;
   detectedAt: string;
+  summary?: string;
+  changedFields?: string[];
   before?: {
     version: string;
     updatedAt: string;
@@ -443,6 +445,11 @@ export interface FeishuStatus {
   lastOutboundAt?: string;
   deliveryStatus?: "idle" | "sending" | "sent" | "received" | "failed";
   deliveryDetail?: string;
+  lastInboundText?: string;
+  lastInboundSender?: string;
+  lastReplyPreview?: string;
+  lastReplyAt?: string;
+  processing?: boolean;
   lastError?: string;
   canSend: boolean;
 }

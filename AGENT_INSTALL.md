@@ -15,7 +15,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-from-githu
 - 安装 npm 依赖。
 - 生成 Windows `.exe` 安装包。
 - 静默运行安装包。
-- 将 `skill-space` 和 `skill-space-capture` 技能安装到：
+- 将 `skill-space` 技能和兼容别名 `skill-space-capture` 安装到：
   - `D:\Skill-Space\skills`
   - `%USERPROFILE%\.codex\skills`
   - `%USERPROFILE%\.agents\skills`
@@ -65,7 +65,7 @@ The script will:
 - Install npm dependencies.
 - Build the Windows `.exe` installer.
 - Run the installer silently.
-- Install bundled `skill-space` and `skill-space-capture` skills into common Windows agent skill roots.
+- Install the bundled `skill-space` skill and its compatibility alias `skill-space-capture` into common Windows agent skill roots.
 - If WSL is available, also try installing the skills into common WSL agent skill roots.
 
 Useful flags:

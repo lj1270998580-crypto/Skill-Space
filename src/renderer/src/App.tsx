@@ -46,7 +46,7 @@ import {
   X,
   XCircle
 } from "lucide-react";
-import { type ReactElement, useEffect, useMemo, useState } from "react";
+import { type ReactElement, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AgentHealth,
   AgentCandidate,
@@ -77,6 +77,12 @@ import { createTranslator } from "./i18n";
 type ViewId = "dashboard" | "skills" | "marketplace" | "runs" | "automations" | "agents" | "feishu" | "settings";
 type ThemeMode = "light" | "dark";
 type MarketplaceScope = "installed" | "cloud" | "uploaded";
+type SystemAlert = {
+  id: string;
+  title: string;
+  detail: string;
+  severity: "warning" | "error";
+};
 type StewardChatMessage = {
   role: "user" | "assistant";
   content: string;
@@ -126,20 +132,59 @@ const statusIcon = {
 };
 
 function isUploadedTemplate(template: SkillTemplateListing): boolean {
-  return Boolean(template.uploaded) || template.source === "local";
+  return Boolean(template.uploaded);
 }
 
-function getMarketplaceScope(template: SkillTemplateListing): MarketplaceScope {
-  if (template.source === "remote") {
-    return "cloud";
+function templateMatchesMarketplaceScope(template: SkillTemplateListing, scope: MarketplaceScope): boolean {
+  if (scope === "cloud") {
+    return template.source === "remote";
   }
-  if (isUploadedTemplate(template)) {
-    return "uploaded";
+  if (scope === "uploaded") {
+    return isUploadedTemplate(template);
   }
-  if (template.installed) {
-    return "installed";
+  return Boolean(template.installed) || template.source === "local";
+}
+
+function templateUpdatedTime(template: SkillTemplateListing): number {
+  const time = Date.parse(template.updatedAt);
+  return Number.isFinite(time) ? time : 0;
+}
+
+function marketplaceTemplateScore(template: SkillTemplateListing, scope: MarketplaceScope): number {
+  let score = templateUpdatedTime(template) / 100_000_000_000;
+  if (scope === "cloud" && template.source === "remote") {
+    score += 40;
   }
-  return "cloud";
+  if (scope === "installed" && template.installed) {
+    score += 40;
+  }
+  if (scope === "installed" && template.source === "local") {
+    score += 20;
+  }
+  if (scope === "uploaded" && template.uploaded) {
+    score += 40;
+  }
+  if (template.hasPackage || template.packageUrl || template.packageRoot) {
+    score += 8;
+  }
+  if (template.requiredVariables.length > 0) {
+    score += 4;
+  }
+  return score;
+}
+
+function dedupeMarketplaceTemplates(templates: SkillTemplateListing[], scope: MarketplaceScope): SkillTemplateListing[] {
+  const byId = new Map<string, SkillTemplateListing>();
+  templates.forEach((template) => {
+    if (!templateMatchesMarketplaceScope(template, scope)) {
+      return;
+    }
+    const existing = byId.get(template.id);
+    if (!existing || marketplaceTemplateScore(template, scope) > marketplaceTemplateScore(existing, scope)) {
+      byId.set(template.id, template);
+    }
+  });
+  return Array.from(byId.values());
 }
 
 const fallbackAgentPresets: AgentPreset[] = [
@@ -174,6 +219,12 @@ const fallbackAgentPresets: AgentPreset[] = [
     args: ["{{prompt}}"]
   }
 ];
+
+const supportSkillIds = new Set(["skill-space", "skill-space-capture", "skill-space-smoke-test", "system-context"]);
+
+function isSupportSkill(skill: SkillSummary): boolean {
+  return supportSkillIds.has(skill.id);
+}
 
 function readStoredStewardMessages(): StewardChatMessage[] {
   try {
@@ -301,14 +352,15 @@ export function App(): ReactElement {
   });
 
   const t = useMemo(() => createTranslator(locale), [locale]);
+  const visibleSkills = useMemo(() => (payload?.skills ?? []).filter((skill) => !isSupportSkill(skill)), [payload?.skills]);
 
   const selectedSkill = useMemo(() => {
-    if (!payload?.skills.length) {
+    if (!visibleSkills.length) {
       return null;
     }
 
-    return payload.skills.find((skill) => skill.id === selectedSkillId) ?? payload.skills[0];
-  }, [payload?.skills, selectedSkillId]);
+    return visibleSkills.find((skill) => skill.id === selectedSkillId) ?? visibleSkills[0];
+  }, [visibleSkills, selectedSkillId]);
 
   const availableAgents = useMemo(
     () => payload?.agents.filter((agent) => agent.enabled && agent.status === "online") ?? [],
@@ -325,13 +377,13 @@ export function App(): ReactElement {
 
   const allSkillTags = useMemo(() => {
     const tags = new Set<string>();
-    payload?.skills.forEach((skill) => skill.tags.forEach((tag) => tags.add(tag)));
+    visibleSkills.forEach((skill) => skill.tags.forEach((tag) => tags.add(tag)));
     return Array.from(tags).sort((a, b) => a.localeCompare(b));
-  }, [payload?.skills]);
+  }, [visibleSkills]);
 
   const filteredSkills = useMemo(() => {
     const query = skillQuery.trim().toLowerCase();
-    return (payload?.skills ?? []).filter((skill) => {
+    return visibleSkills.filter((skill) => {
       const matchesQuery =
         !query ||
         [skillAliases[skill.id], skill.name, skill.id, skill.description, skill.tags.join(" ")]
@@ -342,14 +394,11 @@ export function App(): ReactElement {
       const matchesFavorite = !favoritesOnly || favoriteSkillIds.includes(skill.id);
       return matchesQuery && matchesTag && matchesFavorite;
     });
-  }, [payload?.skills, skillQuery, selectedTag, favoritesOnly, favoriteSkillIds, skillAliases]);
+  }, [visibleSkills, skillQuery, selectedTag, favoritesOnly, favoriteSkillIds, skillAliases]);
 
   const filteredMarketplaceTemplates = useMemo(() => {
     const query = marketplaceQuery.trim().toLowerCase();
-    return marketplaceTemplates.filter((template) => {
-      if (getMarketplaceScope(template) !== marketplaceScope) {
-        return false;
-      }
+    return dedupeMarketplaceTemplates(marketplaceTemplates, marketplaceScope).filter((template) => {
       if (!query) {
         return true;
       }
@@ -368,13 +417,27 @@ export function App(): ReactElement {
   }, [marketplaceTemplates, marketplaceQuery, marketplaceScope]);
 
   const marketplaceScopeCounts = useMemo(() => {
-    return marketplaceTemplates.reduce<Record<MarketplaceScope, number>>(
-      (counts, template) => {
-        counts[getMarketplaceScope(template)] += 1;
-        return counts;
-      },
-      { installed: 0, cloud: 0, uploaded: 0 }
-    );
+    const ids: Record<MarketplaceScope, Set<string>> = {
+      installed: new Set<string>(),
+      cloud: new Set<string>(),
+      uploaded: new Set<string>()
+    };
+    marketplaceTemplates.forEach((template) => {
+        if (templateMatchesMarketplaceScope(template, "installed")) {
+          ids.installed.add(template.id);
+        }
+        if (templateMatchesMarketplaceScope(template, "cloud")) {
+          ids.cloud.add(template.id);
+        }
+        if (templateMatchesMarketplaceScope(template, "uploaded")) {
+          ids.uploaded.add(template.id);
+        }
+    });
+    return {
+      installed: ids.installed.size,
+      cloud: ids.cloud.size,
+      uploaded: ids.uploaded.size
+    };
   }, [marketplaceTemplates]);
 
   const selectedTemplate = useMemo(() => {
@@ -384,6 +447,44 @@ export function App(): ReactElement {
 
     return filteredMarketplaceTemplates.find((template) => template.id === selectedTemplateId) ?? filteredMarketplaceTemplates[0];
   }, [filteredMarketplaceTemplates, selectedTemplateId]);
+
+  const systemAlerts = useMemo<SystemAlert[]>(() => {
+    const alerts: SystemAlert[] = [];
+    const failedRun = runHistory.find((run) => run.status === "failed");
+    if (failedRun) {
+      alerts.push({
+        id: `run-${failedRun.runId}`,
+        title: t("alert.runFailed"),
+        detail: `${failedRun.skillName}: ${failedRun.diagnostic || failedRun.lastMessage || t("run.summary.failedResult")}`,
+        severity: "error"
+      });
+    }
+    if (backgroundScheduler?.lastError) {
+      alerts.push({
+        id: "scheduler-error",
+        title: t("alert.schedulerError"),
+        detail: backgroundScheduler.lastError,
+        severity: "error"
+      });
+    }
+    if (feishuStatus?.lastError || feishuStatus?.deliveryStatus === "failed") {
+      alerts.push({
+        id: "feishu-error",
+        title: t("alert.feishuError"),
+        detail: feishuStatus.lastError || feishuStatus.deliveryDetail || t("feishu.delivery.failed"),
+        severity: "warning"
+      });
+    }
+    if (updateStatus?.state === "error") {
+      alerts.push({
+        id: "update-error",
+        title: t("alert.updateError"),
+        detail: updateStatus.error || updateStatus.detail,
+        severity: "warning"
+      });
+    }
+    return alerts.slice(0, 4);
+  }, [backgroundScheduler?.lastError, feishuStatus?.deliveryDetail, feishuStatus?.deliveryStatus, feishuStatus?.lastError, runHistory, t, updateStatus?.detail, updateStatus?.error, updateStatus?.state]);
 
   useEffect(() => {
     if (filteredMarketplaceTemplates.length === 0) {
@@ -421,7 +522,7 @@ export function App(): ReactElement {
     setSelectedTemplateId((current) =>
       current && templates.some((template) => template.id === current)
         ? current
-        : templates.find((template) => getMarketplaceScope(template) === marketplaceScope)?.id ?? templates[0]?.id ?? null
+        : templates.find((template) => templateMatchesMarketplaceScope(template, marketplaceScope))?.id ?? templates[0]?.id ?? null
     );
     setSelectedRunId((current) => current ?? next.runs[0]?.runId ?? null);
     setLocale(
@@ -469,7 +570,7 @@ export function App(): ReactElement {
     setSelectedTemplateId((current) =>
       current && templates.some((template) => template.id === current)
         ? current
-        : templates.find((template) => getMarketplaceScope(template) === marketplaceScope)?.id ?? templates[0]?.id ?? null
+        : templates.find((template) => templateMatchesMarketplaceScope(template, marketplaceScope))?.id ?? templates[0]?.id ?? null
     );
     setSelectedRunId((current) => current ?? runs[0]?.runId ?? null);
     setSelectedSkillId((current) => current ?? skills[0]?.id ?? null);
@@ -566,9 +667,9 @@ export function App(): ReactElement {
       setMarketplaceTemplates(templates);
       setPayload((current) => (current ? { ...current, skills } : current));
       setSelectedTemplateId((current) =>
-        current && templates.some((template) => template.id === current && getMarketplaceScope(template) === marketplaceScope)
+        current && templates.some((template) => template.id === current && templateMatchesMarketplaceScope(template, marketplaceScope))
           ? current
-          : templates.find((template) => getMarketplaceScope(template) === marketplaceScope)?.id ?? templates[0]?.id ?? null
+          : templates.find((template) => templateMatchesMarketplaceScope(template, marketplaceScope))?.id ?? templates[0]?.id ?? null
       );
       const remoteCount = templates.filter((template) => template.source === "remote").length;
       setMarketplaceMessage(`${t("marketplace.refreshDone")}: ${templates.length} / ${t("marketplace.remote")}: ${remoteCount}`);
@@ -613,7 +714,9 @@ export function App(): ReactElement {
       const templates = await window.skillSpace.refreshMarketplaceTemplates();
       setMarketplaceTemplates(templates);
       setSelectedTemplateId((current) =>
-        current === selectedTemplate.id ? templates.find((template) => getMarketplaceScope(template) === marketplaceScope)?.id ?? null : current
+        current === selectedTemplate.id
+          ? templates.find((template) => templateMatchesMarketplaceScope(template, marketplaceScope))?.id ?? null
+          : current
       );
       setMarketplaceMessage(response.message);
     } catch (error) {
@@ -634,10 +737,10 @@ export function App(): ReactElement {
       const response = await window.skillSpace.shareMarketplaceTemplate(selectedTemplate.id);
       const templates = await window.skillSpace.refreshMarketplaceTemplates();
       setMarketplaceTemplates(templates);
-      setMarketplaceScope(response.uploaded ? "cloud" : "uploaded");
+      setMarketplaceScope("uploaded");
       setSelectedTemplateId(
         templates.find((template) => template.id === selectedTemplate.id)?.id ??
-          templates.find((template) => getMarketplaceScope(template) === (response.uploaded ? "cloud" : "uploaded"))?.id ??
+          templates.find((template) => templateMatchesMarketplaceScope(template, "uploaded"))?.id ??
           null
       );
       setMarketplaceMessage(response.message);
@@ -1424,7 +1527,7 @@ export function App(): ReactElement {
           <section className="main-stage">
             <MetricStrip
               t={t}
-              skillCount={payload?.skills.length ?? 0}
+              skillCount={visibleSkills.length}
               onlineCount={onlineCount}
               runtime={payload?.config.defaultRuntime ?? "claude"}
               permissions={payload?.config.permissionsMode ?? "full"}
@@ -1432,7 +1535,7 @@ export function App(): ReactElement {
 
             {activeView === "dashboard" && (
               <DashboardPanel
-                skills={payload?.skills ?? []}
+                skills={visibleSkills}
                 agents={payload?.agents ?? []}
                 locale={locale}
                 aliases={skillAliases}
@@ -1441,6 +1544,7 @@ export function App(): ReactElement {
                 stewardMessages={stewardMessages}
                 isLlmBusy={isLlmBusy}
                 llmStatus={llmStatus}
+                alerts={systemAlerts}
                 onLlmPromptChange={setLlmPrompt}
                 onAskLlm={() => void askLlm()}
                 onClearStewardChat={clearStewardChat}
@@ -1557,7 +1661,7 @@ export function App(): ReactElement {
 
             {activeView === "automations" && selectedSkill && (
               <AutomationPanel
-                skills={payload?.skills ?? []}
+                skills={visibleSkills}
                 schedules={schedules}
                 selectedSkill={selectedSkill}
                 selectedAgent={selectedAgent}
@@ -1614,6 +1718,7 @@ export function App(): ReactElement {
               <RunSidePanel
                 selectedRun={selectedRun}
                 history={runHistory}
+                events={runEvents}
                 artifacts={runArtifacts}
                 locale={locale}
                 aliases={skillAliases}
@@ -1691,6 +1796,7 @@ function DashboardPanel({
   stewardMessages,
   isLlmBusy,
   llmStatus,
+  alerts,
   onLlmPromptChange,
   onAskLlm,
   onClearStewardChat,
@@ -1708,6 +1814,7 @@ function DashboardPanel({
   stewardMessages: StewardChatMessage[];
   isLlmBusy: boolean;
   llmStatus: LlmManagerStatus | null;
+  alerts: SystemAlert[];
   onLlmPromptChange: (value: string) => void;
   onAskLlm: () => void;
   onClearStewardChat: () => void;
@@ -1737,6 +1844,25 @@ function DashboardPanel({
           </button>
         </div>
       </article>
+
+      {alerts.length > 0 && (
+        <article className="dashboard-section system-alerts glass-panel">
+          <div className="section-title">
+            <div>
+              <XCircle size={18} />
+              <strong>{t("alert.title")}</strong>
+            </div>
+          </div>
+          <div className="alert-list">
+            {alerts.map((alert) => (
+              <button className={`alert-row ${alert.severity}`} key={alert.id} onClick={onOpenRuns} type="button">
+                <strong>{alert.title}</strong>
+                <span>{alert.detail}</span>
+              </button>
+            ))}
+          </div>
+        </article>
+      )}
 
       <article className="dashboard-section steward-chat glass-panel">
         <div className="section-title">
@@ -1980,7 +2106,7 @@ function SkillLibrary({
                 <Star size={16} />
               </span>
             </div>
-            <p>{skill.description}</p>
+            <p title={skill.description}>{skill.description}</p>
             <div className="chip-row">
               <span className="chip">{skill.defaultRuntime}</span>
               <span className="chip">{t("view.version")} {skill.version}</span>
@@ -2048,7 +2174,10 @@ function MarketplacePanel({
   onShare: () => void;
   t: (key: string) => string;
 }): ReactElement {
-  const configurableVariables = selectedTemplate?.requiredVariables.filter((variable) => variable.kind !== "path") ?? [];
+  const deferRemoteConfiguration = selectedTemplate?.source === "remote" && !selectedTemplate.installed;
+  const configurableVariables = deferRemoteConfiguration
+    ? []
+    : (selectedTemplate?.requiredVariables.filter((variable) => variable.kind !== "path") ?? []);
   const missingRequired = false;
   const requirementServices = Array.isArray(selectedTemplate?.requirements?.externalServices)
     ? selectedTemplate.requirements.externalServices.map(String)
@@ -2119,7 +2248,7 @@ function MarketplacePanel({
                     </div>
                     {template.installed ? <CheckCircle2 size={18} /> : <Globe2 size={18} />}
                   </div>
-                  <p>{template.description}</p>
+                  <p title={template.description}>{template.description}</p>
                   <div className="template-meta">
                     <span>{template.uploaded ? t("marketplace.uploaded") : t(`marketplace.${template.source ?? "official"}`)}</span>
                     <span>{template.installed ? t("marketplace.installed") : t("marketplace.notInstalled")}</span>
@@ -2524,6 +2653,12 @@ function AgentPanel({
     setSavingAgentId(agentId);
     try {
       await onSave(agentId, config);
+      if (isAgentCandidate(preset)) {
+        setCandidates((current) => current.map((candidate) => (
+          candidate.id === preset.id ? { ...candidate, alreadyConfigured: true } : candidate
+        )));
+        setSelectedPresetId(agentId);
+      }
     } finally {
       window.setTimeout(() => setSavingAgentId(null), 400);
     }
@@ -2714,6 +2849,14 @@ function RunConsole({
   isRunning: boolean;
 }): ReactElement {
   const canContinue = Boolean(selectedRun?.sessionId && selectedRun.runtime === "claude" && followUpInput.trim());
+  const consoleBodyRef = useRef<HTMLDivElement | null>(null);
+
+  function scrollToLogBottom(): void {
+    const node = consoleBodyRef.current;
+    if (node) {
+      node.scrollTo({ top: node.scrollHeight, behavior: "smooth" });
+    }
+  }
 
   return (
     <section className="run-grid">
@@ -2727,7 +2870,7 @@ function RunConsole({
             {t("action.clear")}
           </button>
         </div>
-        <div className="console-body">
+        <div className="console-body" ref={consoleBodyRef}>
           {events.length === 0 ? (
             <span className="muted">{t("run.empty")}</span>
           ) : (
@@ -2737,6 +2880,11 @@ function RunConsole({
                 {event.message}
               </pre>
             ))
+          )}
+          {events.length > 0 && (
+            <button className="log-bottom-button" onClick={scrollToLogBottom} type="button" title={t("run.scrollBottom")}>
+              <ChevronRight size={16} />
+            </button>
           )}
         </div>
       </article>
@@ -2765,9 +2913,44 @@ function RunConsole({
   );
 }
 
+function formatRunDuration(run: RunSummary): string {
+  if (!run.endedAt) {
+    return "进行中";
+  }
+  const durationMs = Math.max(0, new Date(run.endedAt).getTime() - new Date(run.startedAt).getTime());
+  const seconds = Math.max(1, Math.round(durationMs / 1000));
+  if (seconds < 60) {
+    return `${seconds}s`;
+  }
+  const minutes = Math.floor(seconds / 60);
+  const restSeconds = seconds % 60;
+  return restSeconds ? `${minutes}m ${restSeconds}s` : `${minutes}m`;
+}
+
+function buildRunResultSummary(run: RunSummary, events: RunEvent[], t: (key: string) => string): string {
+  if (run.status === "waiting_input") {
+    return t("run.summary.waitingResult");
+  }
+  if (run.status === "failed") {
+    return run.diagnostic || t("run.summary.failedResult");
+  }
+  const assistantMessage = [...events].reverse().find((event) => event.type === "assistant" && event.message.trim())?.message;
+  if (assistantMessage) {
+    return assistantMessage.replace(/\s+/g, " ").slice(0, 260);
+  }
+  if (run.lastMessage) {
+    return run.lastMessage.replace(/\s+/g, " ").slice(0, 260);
+  }
+  if (run.status === "completed") {
+    return t("run.summary.completedResult");
+  }
+  return t("view.none");
+}
+
 function RunSidePanel({
   selectedRun,
   history,
+  events,
   artifacts,
   locale,
   aliases,
@@ -2778,6 +2961,7 @@ function RunSidePanel({
 }: {
   selectedRun: RunSummary | null;
   history: RunSummary[];
+  events: RunEvent[];
   artifacts: RunArtifact[];
   locale: Locale;
   aliases: Record<string, string>;
@@ -2838,10 +3022,10 @@ function RunSidePanel({
         </div>
       </article>
 
-      <article className="artifacts-panel glass-panel">
+      <article className="artifacts-panel run-summary-panel glass-panel">
         <div className="section-title">
           <div>
-            <FolderOpen size={18} />
+            <GitCompare size={18} />
             <strong>{t("run.artifacts")}</strong>
           </div>
           <button className="text-button" onClick={onOpenRunFolder} type="button" disabled={!selectedRun}>
@@ -2849,20 +3033,51 @@ function RunSidePanel({
             {t("action.openFolder")}
           </button>
         </div>
-        <div className="artifact-list">
-          {artifacts.length === 0 ? (
+        <div className="run-summary-list">
+          {!selectedRun ? (
             <span className="muted">{t("run.noArtifacts")}</span>
           ) : (
-            artifacts.map((artifact) => (
-              <div className="artifact-row" key={artifact.path}>
-                <FileText size={15} />
-                <div>
-                  <strong>{artifact.name}</strong>
-                  <span>{artifact.kind} - {artifact.size ? `${Math.ceil(artifact.size / 1024)} KB` : t("view.none")}</span>
-                </div>
-                <time>{formatDate(artifact.updatedAt, locale)}</time>
+            <>
+              <div className="summary-row">
+                <span>{t("run.summary.status")}</span>
+                <strong>{t(`status.${selectedRun.status}`)}</strong>
               </div>
-            ))
+              <div className="summary-row">
+                <span>{t("run.summary.duration")}</span>
+                <strong>{formatRunDuration(selectedRun)}</strong>
+              </div>
+              <div className="summary-row vertical">
+                <span>{t("run.summary.result")}</span>
+                <p>{buildRunResultSummary(selectedRun, events, t)}</p>
+              </div>
+              {(selectedRun.status === "failed" || selectedRun.diagnostic) && (
+                <div className="summary-row vertical danger">
+                  <span>{t("run.summary.diagnostic")}</span>
+                  <p>{selectedRun.diagnostic || t("run.summary.unknownFailure")}</p>
+                </div>
+              )}
+              {selectedRun.status === "waiting_input" && (
+                <div className="summary-row vertical waiting">
+                  <span>{t("run.summary.waiting")}</span>
+                  <p>{selectedRun.lastMessage || t("run.summary.waitingFallback")}</p>
+                </div>
+              )}
+              <div className="summary-row vertical">
+                <span>{t("run.summary.artifacts")}</span>
+                {artifacts.length === 0 ? (
+                  <p>{t("run.noArtifacts")}</p>
+                ) : (
+                  <ul>
+                    {artifacts.slice(0, 6).map((artifact) => (
+                      <li key={artifact.path}>
+                        <FileText size={13} />
+                        <span>{artifact.name}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            </>
           )}
         </div>
       </article>
@@ -3088,6 +3303,13 @@ function FeishuPanel({
     setFeishuReceiveIdType(feishuStatus?.receiveIdType ?? "open_id");
   }, [feishuStatus?.appId, feishuStatus?.receiveId, feishuStatus?.receiveIdType]);
 
+  const inboundText = feishuStatus?.lastInboundText?.trim();
+  const inboundSender = feishuStatus?.lastInboundSender?.trim() || "Feishu";
+  const replyText = feishuStatus?.processing
+    ? t("feishu.chatThinking")
+    : feishuStatus?.lastReplyPreview?.trim() || t("feishu.chatThinking");
+  const chatTime = feishuStatus?.lastEventAt ? formatDate(feishuStatus.lastEventAt, locale) : t("view.none");
+
   return (
     <section className="feishu-page">
       <article className="feishu-hero glass-panel">
@@ -3205,22 +3427,36 @@ function FeishuPanel({
           <div className="section-title">
             <div>
               <ScrollText size={18} />
-              <strong>{t("feishu.messagePreview")}</strong>
+              <strong>{t("feishu.chatStatus")}</strong>
             </div>
-            <time>{feishuStatus?.lastEventAt ? formatDate(feishuStatus.lastEventAt, locale) : t("view.none")}</time>
+            <time>{chatTime}</time>
           </div>
-          <div className="feishu-message-stack">
-            <div className="feishu-message-card active">
-              <span>{t("feishu.previewStarted")}</span>
-              <strong>Skill-Space | {t("run.started")}</strong>
-              <p>{t("feishu.previewStartedBody")}</p>
+          {inboundText ? (
+            <div className="feishu-chat-preview">
+              <div className="feishu-chat-time">{chatTime}</div>
+              <div className="feishu-chat-row incoming">
+                <div className="feishu-avatar">{inboundSender.slice(0, 1).toUpperCase()}</div>
+                <div className="feishu-bubble">
+                  <p>{inboundText}</p>
+                  <span className="feishu-agent-pill">🤖 Claude Code</span>
+                </div>
+              </div>
+              <div className="feishu-reply-count">
+                <MessageCircle size={14} />
+                <span>{t("feishu.chatReplies")}</span>
+              </div>
+              <div className={`feishu-reply-card ${feishuStatus?.processing ? "thinking" : ""}`}>
+                <span>| {t("feishu.chatReplyTo")} {inboundSender}: {inboundText}</span>
+                <p>{replyText}</p>
+              </div>
             </div>
-            <div className="feishu-message-card waiting">
-              <span>{t("status.waiting_input")}</span>
-              <strong>{t("feishu.previewWaiting")}</strong>
-              <p>{t("feishu.previewWaitingBody")}</p>
+          ) : (
+            <div className="empty-state compact">
+              <MessageCircle size={22} />
+              <strong>{t("feishu.chatReceived")}</strong>
+              <p>{t("feishu.chatNoMessage")}</p>
             </div>
-          </div>
+          )}
         </article>
 
         <article className="feishu-card glass-panel">
@@ -3805,9 +4041,11 @@ function SkillInspector({
               <strong>
                 {change.before?.version && change.before.version !== change.after.version
                   ? `${change.before.version} -> ${change.after.version}`
-                  : locale === "zh-CN" ? "\u5185\u5bb9\u66f4\u65b0" : "Content updated"}
+                  : change.changedFields?.includes("description")
+                    ? locale === "zh-CN" ? "说明更新" : "Description updated"
+                    : locale === "zh-CN" ? "\u6587\u4ef6\u66f4\u65b0" : "Files updated"}
               </strong>
-              <small>{change.after.description}</small>
+              <small>{change.summary || change.after.description}</small>
             </div>
           ))}
         </div>
