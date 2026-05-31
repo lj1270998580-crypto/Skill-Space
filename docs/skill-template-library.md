@@ -1,49 +1,68 @@
 # Skill Template Library / 工作流模板库
 
-Skill-Space 的工作流库用于把个人工作流 Skill 转换成可复用模板。上传或分享前，应用会生成一个去本机化的模板包，尽量避免把个人路径、账号、密钥和临时产物带到公共库。
+The Skill-Space workflow library turns personal workflow skills into reusable templates. Before publishing, Skill-Space prepares a generic package, extracts required runtime configuration, and performs a basic safety review so another user can install and configure the workflow locally.
 
-The Skill-Space workflow library turns personal workflow skills into reusable templates. Before sharing, Skill-Space prepares a generic package and extracts required runtime configuration so another user can install and configure it locally.
+Skill-Space 工作流库用于把个人工作流 Skill 转换为可复用模板。发布前，应用会生成通用模板包、提取运行必填配置，并执行基础安全审计，方便其他用户安装后在本机补齐配置并运行。
 
-## Flow / 流程
+## Library Views / 库视图
 
-1. 在本地技能库选择一个已经跑通的 Skill。
-2. 点击“加入工作流库”，应用会复制技能文件到本地模板包目录。
-3. 发布处理器扫描 `SKILL.md`、脚本和元数据，提取路径、密钥引用和文本变量。
-4. 生成 `.skillspace/publish.json` 与 `.skillspace/inputs.schema.json`。
-5. 本地工作流库会出现该模板，可删除、安装测试或生成分享包。
-6. 在线库通过 `catalog.json` 提供远端模板列表；应用点击“刷新在线库”后联网读取。
+| View | Purpose |
+| --- | --- |
+| Installed / 已安装 | Templates that already exist in the local Skill-Space skill library |
+| Cloud / 云端库 | Templates fetched from the online catalog |
+| Uploaded / 已上传 | Templates published by the current local app and removable from the server |
 
-## Runtime Configuration / 运行配置
+## Publish Flow / 发布流程
 
-模板安装时不会要求用户填写安装路径。路径变量由 Skill-Space 自动指向本地技能库目录。用户只需要填写真正影响工作流运行的配置，例如：
+1. Select a working local Skill from the skill library.
+2. Click "生成模板并加入库" in the skill detail panel.
+3. Skill-Space scans `SKILL.md`, scripts, references, assets, and `.skillspace/` metadata.
+4. Local-only values are converted into variables when possible.
+5. A template package is written under the local marketplace/publish area.
+6. The safety review checks for local paths, plaintext secrets, private accounts, public-account names, and other sensitive values.
+7. If the template passes review, it can be uploaded to the cloud library.
+8. Other users install it from the cloud library, then fill in required runtime configuration from the installed skill detail page.
 
-- API Key 或密钥引用
-- 账号名称、发布渠道、业务目标
-- 需要连接的服务、站点、Webhook 或数据源
-- 输出格式、语言、风格、审核规则
+## Runtime Configuration / 运行必填配置
 
-Variables use these placeholder formats:
+Template installation does not ask the user to choose an install path. Templates are installed into the Skill-Space skill directory automatically.
+
+模板安装时不要求用户选择安装路径，默认安装到 Skill-Space 技能库目录。用户只需要在安装后补齐真正影响工作流运行的配置，例如：
+
+- API key, token, secret reference
+- Service endpoint, webhook, domain, or database source
+- Account name, publishing channel, project name, or business target
+- Output language, style, review rules, and delivery format
+
+Variable placeholders use these formats:
 
 ```text
-{{path.workspace_path}}
+{{path.workspace}}
 {{secret.api_key}}
 {{text.project_name}}
+{{service.webhook_url}}
 ```
 
-## Catalog Format / 在线目录格式
+## Dependency Handling / 依赖处理
 
-The online catalog is a JSON document hosted at:
+If a workflow skill was created by combining multiple skills, the publish step should include the needed dependent skills or convert them into explicit dependencies. A reusable template should not only contain "call another skill" instructions when that skill may not exist on another user's machine.
+
+如果工作流由多个 Skill 组合而成，发布模板时应当把必要依赖一并纳入模板包，或写成明确依赖项。模板不能只保留“调用某某 Skill”的指令，否则其他用户电脑上没有该 Skill 时就无法复用。
+
+## Online Catalog / 在线目录
+
+The online catalog is hosted at:
 
 ```text
 https://ailabing.cn/downloads/skill-space/templates/catalog.json
 ```
 
-Example:
+Minimal catalog shape:
 
 ```json
 {
   "schemaVersion": "skillspace.marketplace.catalog.v1",
-  "generatedAt": "2026-05-22T08:00:00.000Z",
+  "generatedAt": "2026-05-31T10:30:10.000Z",
   "templates": [
     {
       "id": "wechat-daily-article",
@@ -52,29 +71,51 @@ Example:
       "version": "1.0.0",
       "author": "Skill-Space",
       "category": "公众号",
-      "downloads": 1280,
-      "rating": 4.8,
+      "downloads": 0,
+      "rating": 0,
       "runtimes": ["claude", "codex"],
       "requiredVariables": [],
       "safetyStatus": "ready",
       "source": "remote",
-      "updatedAt": "2026-05-22T08:00:00.000Z"
+      "updatedAt": "2026-05-31T10:30:10.000Z"
     }
   ]
 }
 ```
 
+Download counts and ratings should come from real server-side data. If the server has no telemetry, the app should show `0` or omit the metric instead of displaying fake values.
+
+下载数量和评分应来自服务端真实数据。没有统计数据时，应显示 `0` 或隐藏指标，而不是使用假数据。
+
+## Install Flow / 安装流程
+
+1. Open the workflow library.
+2. Click "刷新在线库" to fetch the latest remote catalog.
+3. Select a template.
+4. Review required configuration, dependencies, services, and safety status.
+5. Click install. The package is installed into the local Skill-Space skill library.
+6. Open the installed skill detail page and fill missing runtime configuration before running it.
+
+## Delete Flow / 删除流程
+
+- Local templates can be removed from the local workflow library.
+- Uploaded templates can be removed from the server when the app has the upload token recorded locally.
+- Remote templates owned by other users are read-only in the current no-login model.
+
 ## Current Support / 当前支持
 
-- Online refresh: app reads the remote `catalog.json`.
-- Install status: templates show whether a matching local Skill is installed.
-- Local publish: local Skill -> reusable template package -> local workflow library.
-- Local delete: local templates can be removed from the workflow library.
-- Share package: a local or selected template can be exported as an upload-ready package.
+- Online refresh from `catalog.json`.
+- Installed/cloud/uploaded views.
+- Template installation into the local skill directory.
+- Local publish package generation with safety review.
+- Upload to the server without user login.
+- Delete uploaded templates when the local upload token is available.
+- Smoke tests for marketplace loading and install state.
 
-## Roadmap / 后续
+## Roadmap / 后续方向
 
-- Public upload API with account authentication.
-- Server-side package validation, sensitive-content scanning, and review queues.
-- Versioned template downloads instead of metadata-only remote install.
-- Ratings, download counts, author pages, and rollback history.
+- Server-side package validation and sensitive-content scanning.
+- Template version history and rollback.
+- Real download counters and optional ratings.
+- Optional author identity or signing, while keeping no-login upload possible.
+- Better dependency bundling for multi-skill workflows.

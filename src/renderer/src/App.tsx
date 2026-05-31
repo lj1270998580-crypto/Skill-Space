@@ -303,6 +303,13 @@ export function App(): ReactElement {
   const [isTestingLlm, setIsTestingLlm] = useState(false);
   const [llmConfigMessage, setLlmConfigMessage] = useState("");
   const [updateMessage, setUpdateMessage] = useState("");
+  const [dismissedAlertIds, setDismissedAlertIds] = useState<string[]>(() => {
+    try {
+      return JSON.parse(window.localStorage.getItem("skillspace.dismissedAlertIds") ?? "[]") as string[];
+    } catch {
+      return [];
+    }
+  });
   const [useParameterForm, setUseParameterForm] = useState(() => window.localStorage.getItem("skillspace.parameterForm") === "true");
   const [favoriteSkillIds, setFavoriteSkillIds] = useState<string[]>(() => {
     try {
@@ -461,7 +468,7 @@ export function App(): ReactElement {
     }
     if (backgroundScheduler?.lastError) {
       alerts.push({
-        id: "scheduler-error",
+        id: `scheduler-error-${backgroundScheduler.lastErrorAt ?? backgroundScheduler.lastError}`,
         title: t("alert.schedulerError"),
         detail: backgroundScheduler.lastError,
         severity: "error"
@@ -469,7 +476,7 @@ export function App(): ReactElement {
     }
     if (feishuStatus?.lastError || feishuStatus?.deliveryStatus === "failed") {
       alerts.push({
-        id: "feishu-error",
+        id: `feishu-error-${feishuStatus.lastError ?? feishuStatus.deliveryDetail}`,
         title: t("alert.feishuError"),
         detail: feishuStatus.lastError || feishuStatus.deliveryDetail || t("feishu.delivery.failed"),
         severity: "warning"
@@ -477,14 +484,26 @@ export function App(): ReactElement {
     }
     if (updateStatus?.state === "error") {
       alerts.push({
-        id: "update-error",
+        id: `update-error-${updateStatus.error ?? updateStatus.detail}`,
         title: t("alert.updateError"),
         detail: updateStatus.error || updateStatus.detail,
         severity: "warning"
       });
     }
-    return alerts.slice(0, 4);
-  }, [backgroundScheduler?.lastError, feishuStatus?.deliveryDetail, feishuStatus?.deliveryStatus, feishuStatus?.lastError, runHistory, t, updateStatus?.detail, updateStatus?.error, updateStatus?.state]);
+    return alerts.filter((alert) => !dismissedAlertIds.includes(alert.id)).slice(0, 4);
+  }, [
+    backgroundScheduler?.lastError,
+    backgroundScheduler?.lastErrorAt,
+    dismissedAlertIds,
+    feishuStatus?.deliveryDetail,
+    feishuStatus?.deliveryStatus,
+    feishuStatus?.lastError,
+    runHistory,
+    t,
+    updateStatus?.detail,
+    updateStatus?.error,
+    updateStatus?.state
+  ]);
 
   useEffect(() => {
     if (filteredMarketplaceTemplates.length === 0) {
@@ -1136,6 +1155,24 @@ export function App(): ReactElement {
     setBackgroundScheduler(await window.skillSpace.setBackgroundScheduler(enabled));
   }
 
+  async function clearBackgroundSchedulerErrors(): Promise<void> {
+    const next = await window.skillSpace.clearBackgroundSchedulerErrors();
+    setBackgroundScheduler(next);
+    setDismissedAlertIds((current) => {
+      const filtered = current.filter((id) => !id.startsWith("scheduler-error-"));
+      window.localStorage.setItem("skillspace.dismissedAlertIds", JSON.stringify(filtered));
+      return filtered;
+    });
+  }
+
+  function dismissSystemAlert(alertId: string): void {
+    setDismissedAlertIds((current) => {
+      const next = current.includes(alertId) ? current : [...current, alertId];
+      window.localStorage.setItem("skillspace.dismissedAlertIds", JSON.stringify(next));
+      return next;
+    });
+  }
+
   async function startFeishuConnect(): Promise<void> {
     setFeishuStatus(await window.skillSpace.startFeishuConnect({ domain: "feishu" }));
   }
@@ -1551,6 +1588,7 @@ export function App(): ReactElement {
                 t={t}
                 onOpenSkills={() => setActiveView("skills")}
                 onOpenRuns={() => setActiveView("runs")}
+                onDismissAlert={dismissSystemAlert}
                 onSelectSkill={(skill) => {
                   setSelectedSkillId(skill.id);
                   setActiveView("skills");
@@ -1706,6 +1744,7 @@ export function App(): ReactElement {
                 onCloseToTrayChange={(enabled) => void toggleCloseToTray(enabled)}
                 backgroundScheduler={backgroundScheduler}
                 onBackgroundSchedulerChange={(enabled) => void toggleBackgroundScheduler(enabled)}
+                onClearSchedulerErrors={() => void clearBackgroundSchedulerErrors()}
                 onChooseStorageRoot={() => window.skillSpace.chooseStorageRoot()}
                 onSaveStorageRoot={saveStorageRoot}
                 t={t}
@@ -1803,6 +1842,7 @@ function DashboardPanel({
   t,
   onOpenSkills,
   onOpenRuns,
+  onDismissAlert,
   onSelectSkill
 }: {
   skills: SkillSummary[];
@@ -1821,6 +1861,7 @@ function DashboardPanel({
   t: (key: string) => string;
   onOpenSkills: () => void;
   onOpenRuns: () => void;
+  onDismissAlert: (alertId: string) => void;
   onSelectSkill: (skill: SkillSummary) => void;
 }): ReactElement {
   const recentSkills = skills.slice(0, 4);
@@ -1855,10 +1896,15 @@ function DashboardPanel({
           </div>
           <div className="alert-list">
             {alerts.map((alert) => (
-              <button className={`alert-row ${alert.severity}`} key={alert.id} onClick={onOpenRuns} type="button">
-                <strong>{alert.title}</strong>
-                <span>{alert.detail}</span>
-              </button>
+              <div className={`alert-row ${alert.severity}`} key={alert.id}>
+                <button className="alert-main" onClick={onOpenRuns} type="button">
+                  <strong>{alert.title}</strong>
+                  <span>{alert.detail}</span>
+                </button>
+                <button className="alert-dismiss" onClick={() => onDismissAlert(alert.id)} title={t("action.clear")} type="button">
+                  <X size={14} />
+                </button>
+              </div>
             ))}
           </div>
         </article>
@@ -3524,6 +3570,7 @@ function SettingsPanel({
   onCloseToTrayChange,
   backgroundScheduler,
   onBackgroundSchedulerChange,
+  onClearSchedulerErrors,
   onChooseStorageRoot,
   onSaveStorageRoot,
   t
@@ -3549,6 +3596,7 @@ function SettingsPanel({
   onCloseToTrayChange: (enabled: boolean) => void;
   backgroundScheduler: BackgroundSchedulerStatus | null;
   onBackgroundSchedulerChange: (enabled: boolean) => void;
+  onClearSchedulerErrors: () => void;
   onChooseStorageRoot: () => Promise<string | null>;
   onSaveStorageRoot: (dataRoot: string) => Promise<string>;
   t: (key: string) => string;
@@ -3728,7 +3776,12 @@ function SettingsPanel({
         )}
         {backgroundScheduler?.recentErrors && backgroundScheduler.recentErrors.length > 0 && (
           <div className="scheduler-errors">
-            <strong>{t("settings.schedulerErrors")}</strong>
+            <div className="scheduler-errors-title">
+              <strong>{t("settings.schedulerErrors")}</strong>
+              <button className="text-button compact" onClick={onClearSchedulerErrors} type="button">
+                {t("action.clear")}
+              </button>
+            </div>
             {backgroundScheduler.recentErrors.slice(0, 3).map((error) => (
               <span key={error.id}>
                 {formatDate(error.at, locale)} · {error.taskName || error.phase}: {error.message}

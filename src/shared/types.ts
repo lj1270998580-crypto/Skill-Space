@@ -518,6 +518,7 @@ export interface SkillSpaceApi {
   toggleSchedule(scheduleId: string, enabled: boolean): Promise<ScheduledTask>;
   getBackgroundSchedulerStatus(): Promise<BackgroundSchedulerStatus>;
   setBackgroundScheduler(enabled: boolean): Promise<BackgroundSchedulerStatus>;
+  clearBackgroundSchedulerErrors(): Promise<BackgroundSchedulerStatus>;
   getFeishuStatus(): Promise<FeishuStatus>;
   startFeishuConnect(request?: StartFeishuConnectRequest): Promise<FeishuStatus>;
   saveFeishuConfig(request: SaveFeishuConfigRequest): Promise<FeishuStatus>;

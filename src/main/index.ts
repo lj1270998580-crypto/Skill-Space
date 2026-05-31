@@ -58,6 +58,7 @@ import type {
 
 const nodeRequire = createRequire(import.meta.url);
 const { autoUpdater } = nodeRequire("electron-updater") as typeof import("electron-updater");
+autoUpdater.logger = null;
 const legacyConfigPath = "D:\\Skill-Space\\config\\skillspace.config.json";
 const marketplaceCatalogUrl = "https://ailabing.cn/downloads/skill-space/templates/catalog.json";
 const marketplaceUploadUrl = "https://ailabing.cn/api/skill-space/templates/upload";
@@ -146,7 +147,7 @@ let feishuProcessing = false;
 let feishuLastError: string | undefined;
 let feishuRegisterController: AbortController | null = null;
 const feishuHandledMessageIds = new Map<string, number>();
-const feishuMessageChunkLimit = 2_800;
+const feishuMessageChunkLimit = 1_800;
 const feishuReceiptEmojiCandidates = ["THINKING", "OK", "DONE", "SMILE"];
 const isBackgroundSchedulerProcess = process.argv.includes("--background-scheduler");
 let updateStatus: UpdateStatus = {
@@ -458,6 +459,11 @@ async function readSchedulerErrors(config: SkillSpaceConfig, limit = 8): Promise
     .slice(-limit)
     .reverse()
     .map((line) => JSON.parse(line) as NonNullable<BackgroundSchedulerStatus["recentErrors"]>[number]);
+}
+
+async function clearSchedulerErrors(config: SkillSpaceConfig): Promise<BackgroundSchedulerStatus> {
+  await rm(schedulerErrorsPath(config), { force: true });
+  return getBackgroundSchedulerStatus(config);
 }
 
 async function ensureConfig(): Promise<SkillSpaceConfig> {
@@ -1469,18 +1475,57 @@ function wrapFeishuReply(text: string, kind: FeishuReplyKind, title?: string): s
   return [feishuReplyTitle(kind, title), "", `发送时间：${formatFeishuTime(new Date())}`, "", text].join("\n");
 }
 
+function cleanFeishuWaitingMessage(message: string): string {
+  const seen = new Set<string>();
+  const cleaned = formatFeishuOutboundMarkdown(message)
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .filter((line) => {
+      const normalized = stripInlineMarkdown(line).replace(/\s+/g, " ").trim();
+      if (!normalized) {
+        return true;
+      }
+      if (normalized.includes("\u6211\u5728 Skill-Space \u7b49\u5f85\u4f60\u7684\u56de\u590d")) {
+        return false;
+      }
+      if (normalized.includes("\u8bf7\u56de\u590d\u6570\u5b57") && normalized.includes("1-5")) {
+        return false;
+      }
+      if (seen.has(normalized)) {
+        return false;
+      }
+      seen.add(normalized);
+      return true;
+    })
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  return cleaned || formatFeishuOutboundMarkdown(message).trim();
+}
+
 async function notifyFeishuRun(config: SkillSpaceConfig, title: string, lines: string[]): Promise<void> {
   const needsConfirmation =
     title.includes("\u786e\u8ba4") || title.toLowerCase().includes("confirm") || title.includes("\u9700\u8981");
+  const waitingLine = lines.find((line) =>
+    line.includes("\u9700\u8981\u56de\u590d:") || line.includes("\u9700\u8981\u56de\u590d\uff1a")
+  );
+  const regularLines = lines.filter(Boolean).filter((line) => line !== waitingLine);
+  const waitingText = waitingLine
+    ? cleanFeishuWaitingMessage(waitingLine.replace(/^\s*\u9700\u8981\u56de\u590d[:\uff1a]\s*/, ""))
+    : "";
   const message = [
     feishuReplyTitle("system", title),
     "",
     `\u53d1\u9001\u65f6\u95f4\uff1a${formatFeishuTime(new Date())}`,
-    ...lines.filter(Boolean).flatMap(formatFeishuNoticeLine),
-    "",
-    needsConfirmation
-      ? "\u8bf7\u76f4\u63a5\u56de\u590d\u9009\u9879\u7f16\u53f7\u6216\u786e\u8ba4\u5185\u5bb9\uff0c\u4f8b\u5982\uff1a1\u3001A\u3001\u7528\u65b9\u6848B\u3001\u786e\u8ba4\u53d1\u5e03\u3002"
-      : "\u53ef\u53d1\u9001 /skill status \u67e5\u770b\u6700\u8fd1\u8fd0\u884c\u3002"
+    ...regularLines.flatMap(formatFeishuNoticeLine),
+    ...(needsConfirmation
+      ? [
+          "",
+          "\u8bf7\u56de\u590d\u6570\u5b57\uff081-5\uff09\u9009\u62e9\u9009\u9898\uff0c\u6216\u8f93\u5165\u4f60\u81ea\u5df1\u7684\u9009\u9898\u3002",
+          ...(waitingText ? ["", waitingText] : [])
+        ]
+      : ["", "\u53ef\u53d1\u9001 /skill status \u67e5\u770b\u6700\u8fd1\u8fd0\u884c\u3002"])
   ].join("\n");
   await sendFeishuMarkdown(config, message);
 }
@@ -1708,7 +1753,7 @@ async function addFeishuProcessingReaction(messageId: string): Promise<boolean> 
 
 function feishuPostBodyWithoutDuplicateTitle(outbound: string): string {
   return formatFeishuOutboundMarkdown(outbound)
-    .replace(/^\*\*Skill-Space\s*·\s*.+?\*\*\s*\n+/i, "")
+    .replace(/^\*\*Skill-Space\s*(?:\u00b7|.)\s*.+?\*\*\s*\n+/i, "")
     .trim();
 }
 
@@ -6182,7 +6227,17 @@ async function checkForUpdates(): Promise<UpdateStatus> {
     lastCheckedAt: new Date().toISOString(),
     error: undefined
   });
-  const result = await autoUpdater.checkForUpdates();
+  let result;
+  try {
+    result = await autoUpdater.checkForUpdates();
+  } catch (error) {
+    return setUpdateStatus({
+      state: "error",
+      detail: "Update check failed.",
+      error: error instanceof Error ? error.message : String(error),
+      lastCheckedAt: new Date().toISOString()
+    });
+  }
   if (result?.updateInfo && isUpdateNewer(result.updateInfo.version)) {
     setUpdateStatus({
       state: "available",
@@ -6447,6 +6502,9 @@ app.whenReady().then(() => {
   );
   ipcMain.handle("skillspace:set-background-scheduler", async (_, enabled: boolean) =>
     setBackgroundScheduler(await ensureConfig(), enabled)
+  );
+  ipcMain.handle("skillspace:clear-background-scheduler-errors", async () =>
+    clearSchedulerErrors(await ensureConfig())
   );
   ipcMain.handle("skillspace:feishu-status", async () =>
     getFeishuStatus(await ensureConfig())

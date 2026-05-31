@@ -390,6 +390,13 @@ export function installMockApiWhenMissing(): void {
       detail: enabled ? "Mock background scheduler enabled." : "Mock background scheduler disabled.",
       recentErrors: []
     }),
+    clearBackgroundSchedulerErrors: async () => ({
+      supported: true,
+      enabled: false,
+      taskName: "Skill-Space Background Scheduler",
+      detail: "Mock scheduler errors cleared.",
+      recentErrors: []
+    }),
     getFeishuStatus: async () => ({
       enabled: false,
       configured: false,

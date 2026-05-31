@@ -104,6 +104,8 @@ const api: SkillSpaceApi = {
     ipcRenderer.invoke("skillspace:background-scheduler-status") as Promise<BackgroundSchedulerStatus>,
   setBackgroundScheduler: (enabled: boolean) =>
     ipcRenderer.invoke("skillspace:set-background-scheduler", enabled) as Promise<BackgroundSchedulerStatus>,
+  clearBackgroundSchedulerErrors: () =>
+    ipcRenderer.invoke("skillspace:clear-background-scheduler-errors") as Promise<BackgroundSchedulerStatus>,
   getFeishuStatus: () => ipcRenderer.invoke("skillspace:feishu-status"),
   startFeishuConnect: (request = {}) => ipcRenderer.invoke("skillspace:feishu-connect", request),
   saveFeishuConfig: (request: SaveFeishuConfigRequest) =>
