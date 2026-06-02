@@ -6,6 +6,12 @@ import { cp, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promi
 import { createRequire } from "node:module";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
 import QRCode from "qrcode";
+import {
+  feishuRetryDelayMs,
+  markFeishuReceiptSeen,
+  shouldIgnoreFeishuBotEcho
+} from "./services/feishuReliability";
+import { isSkillReferenced, referencedSkillIds } from "./services/templateDependencies";
 import type {
   AgentConfig,
   AgentCandidate,
@@ -1654,21 +1660,10 @@ function extractFeishuMessageCreateTime(rawMessage: unknown): string | undefined
 }
 
 function isRecentlyHandledFeishuMessage(messageId: string | undefined, fallbackKey?: string): boolean {
-  const key = messageId || fallbackKey;
-  if (!key) {
-    return false;
-  }
-  const now = Date.now();
-  for (const [id, expiresAt] of feishuHandledMessageIds) {
-    if (expiresAt <= now) {
-      feishuHandledMessageIds.delete(id);
-    }
-  }
-  if (feishuHandledMessageIds.has(key)) {
-    return true;
-  }
-  feishuHandledMessageIds.set(key, now + 10 * 60_000);
-  return false;
+  return markFeishuReceiptSeen(feishuHandledMessageIds, {
+    messageId: messageId || fallbackKey,
+    content: fallbackKey ?? ""
+  });
 }
 
 function shouldIgnoreFeishuMessage(rawMessage: unknown, content: string, messageId: string | undefined): boolean {
@@ -1691,6 +1686,9 @@ function shouldIgnoreFeishuMessage(rawMessage: unknown, content: string, message
 
   const messageType = extractFeishuMessageType(rawMessage);
   const normalizedContent = stripInlineMarkdown(content);
+  if (shouldIgnoreFeishuBotEcho(messageType, normalizedContent)) {
+    return true;
+  }
   if (
     (messageType === "post" || messageType === "interactive") &&
     (/^Skill-Space\s*[·|]/i.test(normalizedContent) || /发送时间：/.test(normalizedContent))
@@ -1773,15 +1771,26 @@ async function sendFeishuPostReplyChunks(
   for (let index = 0; index < total; index += 1) {
     const chunkTitle = total > 1 ? `${title} (${index + 1}/${total})` : title;
     const chunkBody = index === 0 ? bodyChunks[index] : [`续 ${index + 1}/${total}`, "", bodyChunks[index]].join("\n");
-    try {
-      await feishuChannel.send(
-        target,
-        { post: feishuRichPost(chunkTitle, chunkBody) },
-        inboundMessageId ? { replyTo: inboundMessageId, replyInThread: false } : undefined
-      );
-      sentChunks += 1;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      try {
+        await feishuChannel.send(
+          target,
+          { post: feishuRichPost(chunkTitle, chunkBody) },
+          inboundMessageId ? { replyTo: inboundMessageId, replyInThread: false } : undefined
+        );
+        sentChunks += 1;
+        lastError = undefined;
+        break;
+      } catch (error) {
+        lastError = error;
+        if (attempt < 2) {
+          await new Promise((resolveDelay) => setTimeout(resolveDelay, feishuRetryDelayMs(attempt)));
+        }
+      }
+    }
+    if (lastError) {
+      const message = lastError instanceof Error ? lastError.message : String(lastError);
       throw new FeishuPartialSendError(message, sentChunks);
     }
   }
@@ -3043,9 +3052,7 @@ async function readPublishTextCorpus(root: string): Promise<string> {
 }
 
 function hasSkillReference(corpus: string, skill: SkillSummary): boolean {
-  const haystack = corpus.toLowerCase();
-  const needles = [skill.id, skill.name, ...skill.tags].map((item) => item.toLowerCase()).filter((item) => item.length > 2);
-  return needles.some((needle) => new RegExp(`(^|[^a-z0-9_-])${escapeRegex(needle)}([^a-z0-9_-]|$)`, "i").test(haystack));
+  return isSkillReferenced(corpus, skill);
 }
 
 async function collectSkillDependencies(
@@ -3057,6 +3064,7 @@ async function collectSkillDependencies(
 ): Promise<{ dependencies: SkillTemplateDependency[]; filesProcessed: number; filesCopied: number }> {
   const allSkills = await scanSkills(config);
   const byId = new Map(allSkills.map((skill) => [skill.id, skill]));
+  const rootById = new Map(allSkills.map((skill) => [skill.id, resolve(skill.root)]));
   const queue: Array<{ skill: SkillSummary; depth: number; reason: string }> = [];
   const declared = await readOptionalJson<{ dependencies?: Array<{ id?: string; reason?: string }> }>(
     join(sourceSkill.root, ".skillspace", "dependencies.json")
@@ -3104,6 +3112,40 @@ async function collectSkillDependencies(
       reason: current.reason,
       bundledPath
     });
+    if (current.depth < 3) {
+      const nestedDeclared = await readOptionalJson<{ dependencies?: Array<{ id?: string; reason?: string }> }>(
+        join(current.skill.root, ".skillspace", "dependencies.json")
+      );
+      for (const dependency of nestedDeclared?.dependencies ?? []) {
+        if (!dependency.id || dependency.id === sourceSkill.id || visited.has(dependency.id)) {
+          continue;
+        }
+        const nestedSkill = byId.get(dependency.id);
+        if (nestedSkill) {
+          queue.push({
+            skill: nestedSkill,
+            depth: current.depth + 1,
+            reason: dependency.reason || `Declared dependency of ${current.skill.id}: ${dependency.id}`
+          });
+        } else {
+          warnings.push(`Declared nested dependency was not found locally and cannot be bundled: ${dependency.id}.`);
+        }
+      }
+
+      const nestedCorpus = await readPublishTextCorpus(current.skill.root);
+      for (const dependencyId of referencedSkillIds(nestedCorpus, allSkills, sourceSkill.id, resolve(current.skill.root), rootById)) {
+        if (!visited.has(dependencyId)) {
+          const nestedSkill = byId.get(dependencyId);
+          if (nestedSkill) {
+            queue.push({
+              skill: nestedSkill,
+              depth: current.depth + 1,
+              reason: `Referenced by bundled dependency ${current.skill.id}`
+            });
+          }
+        }
+      }
+    }
   }
   return { dependencies, filesProcessed, filesCopied };
 }
@@ -5600,8 +5642,8 @@ async function getBackgroundSchedulerStatus(config: SkillSpaceConfig): Promise<B
     enabled,
     taskName: backgroundTaskName,
     detail: enabled
-      ? "后台计划任务已安装，会每 5 分钟静默检查到期自动化。"
-      : "后台计划任务未安装，开启后将每 5 分钟静默检查自动化。",
+      ? "\u540e\u53f0\u8ba1\u5212\u4efb\u52a1\u5df2\u5b89\u88c5\uff0c\u4f1a\u6bcf 5 \u5206\u949f\u9759\u9ed8\u68c0\u67e5\u5230\u671f\u81ea\u52a8\u5316\u3002"
+      : "\u540e\u53f0\u8ba1\u5212\u4efb\u52a1\u672a\u5b89\u88c5\uff0c\u5f00\u542f\u540e\u5c06\u6bcf 5 \u5206\u949f\u9759\u9ed8\u68c0\u67e5\u81ea\u52a8\u5316\u3002",
     state: probe?.state,
     nextRunAt: probe?.nextRunAt,
     lastRunAt: probe?.lastRunAt,

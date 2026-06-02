@@ -19,6 +19,9 @@ const MAX_BODY_BYTES = 10 * 1024 * 1024;
 const MAX_PACKAGE_BYTES = 6 * 1024 * 1024;
 const MAX_FILE_BYTES = 800 * 1024;
 const MAX_FILE_COUNT = 320;
+const RATE_LIMIT_WINDOW_MS = 60 * 1000;
+const RATE_LIMIT_MAX_UPLOADS = 20;
+const uploadRateBuckets = new Map();
 
 function sha256(value) {
   return crypto.createHash("sha256").update(value).digest("hex");
@@ -36,6 +39,29 @@ function sendJson(res, status, body) {
     "access-control-allow-headers": "content-type"
   });
   res.end(`${JSON.stringify(body)}\n`);
+}
+
+function clientAddress(req) {
+  const forwarded = String(req.headers["x-forwarded-for"] || "").split(",")[0].trim();
+  return forwarded || req.socket.remoteAddress || "unknown";
+}
+
+function checkUploadRateLimit(req) {
+  const now = Date.now();
+  const key = clientAddress(req);
+  const bucket = uploadRateBuckets.get(key) || { windowStart: now, count: 0 };
+  if (now - bucket.windowStart > RATE_LIMIT_WINDOW_MS) {
+    bucket.windowStart = now;
+    bucket.count = 0;
+  }
+  bucket.count += 1;
+  uploadRateBuckets.set(key, bucket);
+  for (const [bucketKey, value] of uploadRateBuckets) {
+    if (now - value.windowStart > RATE_LIMIT_WINDOW_MS * 5) {
+      uploadRateBuckets.delete(bucketKey);
+    }
+  }
+  return bucket.count <= RATE_LIMIT_MAX_UPLOADS;
 }
 
 function cleanString(input, key, max, fallback = "") {
@@ -178,6 +204,9 @@ function normalizeTemplate(input) {
     requiredVariables,
     dependencies,
     safetyStatus,
+    safetyWarnings: Array.isArray(input.safetyWarnings)
+      ? input.safetyWarnings.map((item) => String(item).trim()).filter(Boolean).slice(0, 30)
+      : [],
     source: "remote",
     updatedAt: new Date().toISOString()
   };
@@ -230,6 +259,40 @@ function normalizePackageFiles(input) {
   return { files, totalBytes };
 }
 
+function scanTemplatePackageSafety(files, template) {
+  const warnings = [];
+  const blockers = [];
+  const checks = [
+    { pattern: /\b(?:sk-[A-Za-z0-9_-]{20,}|sk-proj-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{20,})\b/i, message: "Possible API key or access token remains in package." },
+    { pattern: /-----BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----/i, message: "Private key material is not allowed in online templates.", block: true },
+    { pattern: /\b(?:api[_-]?key|token|secret|password)\s*[:=]\s*["']?(?!\{\{secret\.)[A-Za-z0-9_./+=-]{12,}/i, message: "Possible plaintext secret configuration remains in package." },
+    { pattern: /[A-Za-z]:\\Users\\[^\\\s]+|\/(?:Users|home)\/[^/\s]+/i, message: "Possible user-specific local path remains in package." },
+    { pattern: /\b(?:app[_-]?secret|client[_-]?secret)\s*[:=]\s*["']?(?!\{\{secret\.)[A-Za-z0-9_./+=-]{10,}/i, message: "Possible app secret remains in package." }
+  ];
+
+  const textFiles = files.filter((file) => file.encoding === "utf8");
+  for (const file of textFiles) {
+    const content = String(file.content || "");
+    for (const check of checks) {
+      if (check.pattern.test(content)) {
+        const message = `${check.message} (${file.path})`;
+        if (check.block) {
+          blockers.push(message);
+        } else {
+          warnings.push(message);
+        }
+      }
+    }
+  }
+  if (template.requiredVariables.length === 0 && warnings.some((warning) => /secret|path/i.test(warning))) {
+    warnings.push("Template has safety warnings but no required variables for user configuration.");
+  }
+  return {
+    warnings: [...new Set(warnings)].slice(0, 30),
+    blockers: [...new Set(blockers)].slice(0, 30)
+  };
+}
+
 function packagePathFor(templateId) {
   return path.join(PACKAGE_ROOT, `${templateId}.json`);
 }
@@ -252,6 +315,14 @@ function readRequestBody(req, callback) {
 }
 
 function handleUpload(req, res) {
+  if (!checkUploadRateLimit(req)) {
+    sendJson(res, 429, { ok: false, message: "Too many upload attempts. Please retry later." });
+    return;
+  }
+  if (req.headers["content-type"] && !String(req.headers["content-type"]).toLowerCase().includes("application/json")) {
+    sendJson(res, 415, { ok: false, message: "Only application/json uploads are supported." });
+    return;
+  }
   readRequestBody(req, (error, body) => {
     if (error) {
       sendJson(res, 400, { ok: false, message: error.message });
@@ -265,12 +336,21 @@ function handleUpload(req, res) {
       if (packageBundle.files.length === 0) {
         throw new Error("Template packageFiles are required for online upload.");
       }
+      const safety = scanTemplatePackageSafety(packageBundle.files, template);
+      if (safety.blockers.length > 0) {
+        throw new Error(`Template package failed safety checks: ${safety.blockers.join("; ")}`);
+      }
+      const safeTemplate = {
+        ...template,
+        safetyStatus: safety.warnings.length > 0 ? "review_required" : template.safetyStatus,
+        safetyWarnings: [...new Set([...(template.safetyWarnings || []), ...safety.warnings])].slice(0, 30)
+      };
 
       const packagePayload = {
         schemaVersion: "skillspace.template.package.v1",
         generatedAt: new Date().toISOString(),
         template: {
-          ...template,
+          ...safeTemplate,
           packageFiles: packageBundle.files
         }
       };
@@ -282,7 +362,7 @@ function handleUpload(req, res) {
 
       const deleteToken = randomToken();
       const owners = readOwners();
-      owners[template.id] = {
+      owners[safeTemplate.id] = {
         deleteTokenHash: sha256(deleteToken),
         packagePath,
         updatedAt: new Date().toISOString()
@@ -290,8 +370,8 @@ function handleUpload(req, res) {
       writeOwners(owners);
 
       const summary = stripPrivateAndPackageFields({
-        ...template,
-        packageUrl: packageUrlFor(template.id),
+        ...safeTemplate,
+        packageUrl: packageUrlFor(safeTemplate.id),
         packageSha256: packageHash,
         packageSize: Buffer.byteLength(packageJson, "utf8"),
         hasPackage: true
@@ -301,7 +381,7 @@ function handleUpload(req, res) {
       catalog.generatedAt = new Date().toISOString();
       catalog.templates = [
         summary,
-        ...catalog.templates.filter((item) => item && item.id !== template.id)
+        ...catalog.templates.filter((item) => item && item.id !== safeTemplate.id)
       ].slice(0, 300);
       writeCatalog(catalog);
       sendJson(res, 200, {

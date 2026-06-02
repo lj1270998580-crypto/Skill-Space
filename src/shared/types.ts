@@ -282,6 +282,7 @@ export interface SkillTemplateListing {
   runtimes: AgentId[];
   requiredVariables: PublishTemplateVariable[];
   safetyStatus: "ready" | "review_required";
+  safetyWarnings?: string[];
   updatedAt: string;
   source?: "official" | "local" | "remote";
   packageRoot?: string;

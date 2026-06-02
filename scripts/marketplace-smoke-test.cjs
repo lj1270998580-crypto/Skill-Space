@@ -103,6 +103,43 @@ async function main() {
     assert.equal(oversized.response.status, 400);
     assert.equal(oversized.json.ok, false);
 
+    const unsafePath = await postJson("/upload", {
+      template: {
+        ...template,
+        id: "unsafe-path-template",
+        packageFiles: [{ path: "../SKILL.md", encoding: "utf8", content: "# Unsafe\n" }]
+      }
+    });
+    assert.equal(unsafePath.response.status, 400);
+    assert.equal(unsafePath.json.ok, false);
+
+    const warningUpload = await postJson("/upload", {
+      template: {
+        ...template,
+        id: "warning-template",
+        packageFiles: [
+          {
+            path: "SKILL.md",
+            encoding: "utf8",
+            content: "token = plain-secret-token-12345\nUse C:\\Users\\Alice\\project\\file.txt\n"
+          }
+        ]
+      }
+    });
+    assert.equal(warningUpload.response.status, 200, JSON.stringify(warningUpload.json));
+    assert.equal(warningUpload.json.template.safetyStatus, "review_required");
+    assert.ok(warningUpload.json.template.safetyWarnings.length >= 1);
+
+    const blockedUpload = await postJson("/upload", {
+      template: {
+        ...template,
+        id: "blocked-template",
+        packageFiles: [{ path: "id_rsa", encoding: "utf8", content: "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----" }]
+      }
+    });
+    assert.equal(blockedUpload.response.status, 400);
+    assert.match(blockedUpload.json.message, /safety checks/i);
+
     const deniedDelete = await postJson("/delete", { templateId: "smoke-template" });
     assert.equal(deniedDelete.response.status, 400);
     assert.equal(deniedDelete.json.ok, false);
@@ -114,6 +151,9 @@ async function main() {
     const deleteResult = await postJson("/delete", { templateId: "smoke-template", deleteToken: upload.json.deleteToken });
     assert.equal(deleteResult.response.status, 200);
     assert.equal(deleteResult.json.deleted, true);
+    const warningDelete = await postJson("/delete", { templateId: "warning-template", deleteToken: warningUpload.json.deleteToken });
+    assert.equal(warningDelete.response.status, 200);
+    assert.equal(warningDelete.json.deleted, true);
     const afterDelete = JSON.parse(fs.readFileSync(catalogPath, "utf8"));
     assert.equal(afterDelete.templates.length, 0);
     assert.equal(fs.existsSync(path.join(packageRoot, "smoke-template.json")), false);

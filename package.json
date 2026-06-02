@@ -1,6 +1,6 @@
 {
   "name": "skill-space",
-  "version": "0.1.38",
+  "version": "0.1.39",
   "private": true,
   "type": "module",
   "main": "out/main/index.js",
@@ -17,7 +17,9 @@
     "test:feishu": "node scripts/feishu-routing-smoke-test.cjs",
     "test:safety": "node scripts/publish-safety-smoke-test.cjs",
     "test:run-status": "node scripts/run-status-smoke-test.cjs",
-    "test:all": "npm run typecheck && npm run test:marketplace && npm run test:feishu && npm run test:safety && npm run test:run-status"
+    "test:all": "npm run typecheck && npm run test:marketplace && npm run test:feishu && npm run test:feishu-reliability && npm run test:template-deps && npm run test:safety && npm run test:run-status",
+    "test:feishu-reliability": "node scripts/feishu-reliability-smoke-test.cjs",
+    "test:template-deps": "node scripts/template-dependency-smoke-test.cjs"
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.64.0",
@@ -43,7 +45,7 @@
   "build": {
     "appId": "space.skillspace.desktop",
     "productName": "Skill-Space",
-    "copyright": "Copyright © 2026 Skill-Space",
+    "copyright": "Copyright (c) 2026 Skill-Space",
     "directories": {
       "output": "release"
     },

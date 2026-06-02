@@ -1589,6 +1589,7 @@ export function App(): ReactElement {
                 onOpenSkills={() => setActiveView("skills")}
                 onOpenRuns={() => setActiveView("runs")}
                 onDismissAlert={dismissSystemAlert}
+                onDismissAllAlerts={() => systemAlerts.forEach((alert) => dismissSystemAlert(alert.id))}
                 onSelectSkill={(skill) => {
                   setSelectedSkillId(skill.id);
                   setActiveView("skills");
@@ -1843,6 +1844,7 @@ function DashboardPanel({
   onOpenSkills,
   onOpenRuns,
   onDismissAlert,
+  onDismissAllAlerts,
   onSelectSkill
 }: {
   skills: SkillSummary[];
@@ -1862,6 +1864,7 @@ function DashboardPanel({
   onOpenSkills: () => void;
   onOpenRuns: () => void;
   onDismissAlert: (alertId: string) => void;
+  onDismissAllAlerts: () => void;
   onSelectSkill: (skill: SkillSummary) => void;
 }): ReactElement {
   const recentSkills = skills.slice(0, 4);
@@ -1893,6 +1896,9 @@ function DashboardPanel({
               <XCircle size={18} />
               <strong>{t("alert.title")}</strong>
             </div>
+            <button className="text-button compact" onClick={onDismissAllAlerts} type="button">
+              {t("action.clear")}
+            </button>
           </div>
           <div className="alert-list">
             {alerts.map((alert) => (
@@ -2353,6 +2359,11 @@ function MarketplacePanel({
                 <span>{locale === "zh-CN" ? "\u4f9d\u8d56" : "Dependencies"} {dependencyCount}</span>
                 <span>{locale === "zh-CN" ? "\u670d\u52a1" : "Services"} {requirementServices.length ? requirementServices.join(", ") : (locale === "zh-CN" ? "\u65e0" : "None")}</span>
                 <span>{locale === "zh-CN" ? "\u5de5\u5177" : "Tools"} {requirementTools.length ? requirementTools.join(", ") : (locale === "zh-CN" ? "\u65e0" : "None")}</span>
+                {selectedTemplate.safetyWarnings?.slice(0, 3).map((warning) => (
+                  <span className="template-warning-line" key={warning}>
+                    {locale === "zh-CN" ? "\u63d0\u9192" : "Warning"}: {warning}
+                  </span>
+                ))}
                 {selectedTemplate.source === "remote" && (
                   <span>{locale === "zh-CN" ? "\u8fdc\u7aef\u6a21\u677f\u5b89\u88c5\u65f6\u4f1a\u6821\u9a8c\u5305\u54c8\u5e0c\uff0c\u5e76\u53ea\u5199\u5165\u672c\u5730\u6280\u80fd\u76ee\u5f55\u3002\u5fc5\u586b\u914d\u7f6e\u53ef\u5728\u5b89\u88c5\u540e\u8865\u9f50\u3002" : "Remote package hash is verified before writing into the local skill directory. Required configuration can be completed after install."}</span>
                 )}
@@ -3784,7 +3795,7 @@ function SettingsPanel({
             </div>
             {backgroundScheduler.recentErrors.slice(0, 3).map((error) => (
               <span key={error.id}>
-                {formatDate(error.at, locale)} · {error.taskName || error.phase}: {error.message}
+                {formatDate(error.at, locale)} - {error.taskName || error.phase}: {error.message}
               </span>
             ))}
           </div>
