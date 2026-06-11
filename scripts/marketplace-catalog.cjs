@@ -105,6 +105,25 @@ const templates = [
       { key: "research_topic", label: "研究主题", kind: "text", placeholder: "{{text.research_topic}}", example: "工作流模板库的审核与安装体验" },
       { key: "output_format", label: "输出格式", kind: "text", placeholder: "{{text.output_format}}", example: "Markdown 方案 + 待办清单" }
     ]
+  },
+  {
+    id: "hermes-tweet-monitor",
+    name: "Hermes Tweet 社交监控",
+    description: "用 Hermes Agent 和 Hermes Tweet 执行 X/Twitter 搜索、阅读、整理和待确认发布草稿的模板化工作流。",
+    version: "1.0.0",
+    author: "Skill-Space",
+    category: "社交媒体",
+    downloads: 0,
+    rating: 0,
+    runtimes: ["hermes", "codex"],
+    safetyStatus: "ready",
+    source: "remote",
+    updatedAt,
+    requiredVariables: [
+      { key: "x_query", label: "监控主题或搜索词", kind: "text", placeholder: "{{text.x_query}}", example: "Hermes Agent plugin" },
+      { key: "xquik_api_key", label: "Xquik API Key", kind: "secret", placeholder: "{{secret.xquik_api_key}}", example: "local secret reference only" },
+      { key: "action_policy", label: "写入动作策略", kind: "text", placeholder: "{{text.action_policy}}", example: "只生成草稿；发布、回复、点赞前必须等待确认" }
+    ]
   }
 ];
 
@@ -172,6 +191,29 @@ for (const template of templates) {
       "2. 检索/整理可验证资料和同类工具做法。",
       "3. 输出可落地的产品建议、工程改动点和验证清单。",
       "4. 给出低风险优先级排序。"
+    ]);
+  }
+
+  if (template.id === "hermes-tweet-monitor") {
+    template.templateMarkdown = skillMarkdown(template, [
+      "## 运行配置",
+      "",
+      "- 监控主题或搜索词：{{text.x_query}}",
+      "- 写入动作策略：{{text.action_policy}}",
+      "- API Key：{{secret.xquik_api_key}}",
+      "",
+      "## 前置条件",
+      "",
+      "1. 在 Hermes Agent 中安装 Hermes Tweet：https://github.com/Xquik-dev/hermes-tweet",
+      "2. 只在本地运行环境中配置 `XQUIK_API_KEY`，不要把真实密钥写入模板、日志或对话。",
+      "3. 如需发布、回复、点赞等写入动作，先确认本地已启用 Hermes Tweet 的动作开关。",
+      "",
+      "## 工作流",
+      "",
+      "1. 使用 Hermes Tweet 的读取工具搜索 `{{text.x_query}}` 相关帖子、账号和上下文。",
+      "2. 输出来源链接、关键观点、重复信号、风险提示和可继续追踪的问题。",
+      "3. 如用户需要内容建议，只生成草稿、回复候选和发布前检查清单。",
+      "4. 涉及发布、回复、点赞或转发时，先复述将执行的具体动作并等待用户明确确认。"
     ]);
   }
 }
