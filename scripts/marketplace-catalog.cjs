@@ -200,7 +200,7 @@ for (const template of templates) {
       "",
       "- 监控主题或搜索词：{{text.x_query}}",
       "- 写入动作策略：{{text.action_policy}}",
-      "- API Key：{{secret.xquik_api_key}}",
+      "- API Key：使用本地环境变量 `XQUIK_API_KEY`",
       "",
       "## 前置条件",
       "",
