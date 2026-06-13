@@ -1,6 +1,9 @@
 ---
 name: skill-space-capture
 description: 兼容入口：工作流捕获能力已合并到 skill-space。收到捕获、转换或发布工作流请求时，请转交 skill-space 执行。
+version: 1.0.0
+license: MIT
+metadata.hermes.tags: []
 ---
 
 # Skill-Space Capture

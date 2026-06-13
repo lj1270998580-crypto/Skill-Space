@@ -1,6 +1,9 @@
 ---
 name: skill-space
 description: 将 Codex、Claude Code、OpenClaw 或 Hermes Agent 中可复用的工作流捕获、创建、发布、上传、安装或同步为 Skill-Space 通用技能，并交给本地 Skill-Space 桌面应用管理。
+version: 1.0.0
+license: MIT
+metadata.hermes.tags: []
 ---
 
 # Skill-Space
